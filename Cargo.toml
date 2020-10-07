@@ -1,0 +1,25 @@
+[package]
+name = "web-test"
+version = "0.1.0"
+authors = ["WolverinDEV <git@teaspeak.de>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+# libnice = { git = "https://github.com/WolverinDEV/rust-libnice" }
+libnice = { path = "D:\\git\\rust\\rust-libnice" }
+libusrsctp-sys = { path = "D:\\git\\rust\\rust-usrsctp-sys" }
+tokio-tungstenite = "0.11.0"
+tokio = { version = "0.2", features = ["full"] }
+futures = "0.3.5"
+serde_json = "1.0"
+serde = { version = "1.0.116", features = ["derive"] }
+webrtc-sdp = "0.3.6"
+glib = "0.9"
+async-trait = "0.1.40"
+retain_mut = "0.1.1"
+openssl = "0.10.30"
+lazy_static = "1.4.0"
+libc = "0.2.79"
+byteorder = "1.3.4"
