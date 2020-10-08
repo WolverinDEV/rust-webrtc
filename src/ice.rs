@@ -58,16 +58,31 @@ pub struct ICECredentials {
 }
 
 #[derive(Clone, Debug)]
+pub enum PeerICEConnectionFailReason {
+
+}
+
+#[derive(Clone, Debug)]
+pub enum PeerICEConnectionState {
+    Disconnected,
+    Connecting,
+    Connected,
+    Failed(PeerICEConnectionFailReason)
+}
+
+#[derive(Clone, Debug)]
 pub enum PeerICEConnectionEvent {
     StreamStateChanged(ComponentState),
     LocalIceCandidate(DebugableCandidate),
     LocalIceGatheringFinished(),
-    DtlsInitialized(/* TODO: Export keygen material or setup sctp by our own here */),
+    DtlsInitialized(),
     DtlsInitializeFailed(String),
 
     MessageReceivedDtls(Vec<u8>),
     MessageReceivedRtp(Vec<u8>),
     MessageReceivedRtcp(Vec<u8>),
+
+    InternalIoFailed(Vec<u8>, String)
 }
 
 #[derive(Clone, Debug)]
@@ -218,7 +233,7 @@ impl PeerICEConnection {
         stream.set_remote_credentials(CString::new(remote_credentials.username.clone()).unwrap(), CString::new(remote_credentials.password.clone()).unwrap());
 
         let dtls_stream = DtlsStreamSource{
-            verbose: false,
+            verbose: true ,
             read_buffer_offset: 0,
             read_buffer: VecDeque::with_capacity(32),
             writer: stream.mut_components()[0].writer()
@@ -456,6 +471,11 @@ impl Stream for PeerICEConnection {
                 let mut buffer = [0u8; 2048];
                 match stream.read(&mut buffer) {
                     Ok(read) => {
+                        if read == 0 {
+                            /* TODO: Shutdown handling */
+                            std::mem::replace(&mut self.dtls, Some(DTLSState::Failed()));
+                            println!("DTLS read returned EOF");
+                        }
                         return Poll::Ready(Some(PeerICEConnectionEvent::MessageReceivedDtls(buffer[..read].to_vec())));
                     },
                     Err(error) => {

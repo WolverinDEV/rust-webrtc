@@ -51,9 +51,10 @@ function handleMessage(data: any) {
             if(!peer) { throw "Missing peer"; }
             if(payload.mode !== "answer") { throw "invalid description mode"; }
 
-            console.log("[SDP] Answer:\n%s", payload.sdp);
+            let sdp = payload.sdp.replace("\r\n\r\n", "\r\n");
+            console.log("[SDP] Answer:\n%s", sdp);
             peer.setRemoteDescription(new RTCSessionDescription({
-                sdp: payload.sdp,
+                sdp: sdp,
                 type: "answer"
             })).catch(error => {
                 console.error("Failed to apply answer: %o", error);
@@ -162,6 +163,8 @@ async function initializePeer() {
             //stream.connect(audioContext.destination);
         }
     };
+
+    await initializePeerApplication(peer);
 
     const kEnableAudio = true;
     if(kEnableAudio) {

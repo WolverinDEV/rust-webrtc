@@ -288,7 +288,6 @@ impl PeerConnection {
         let mut keys = self.media_channel.keys().map(|e| e.clone()).collect::<Vec<MediaId>>();
         keys.sort_by_key(|e| e.0);
 
-        println!("Order: {:?}", &keys);
         for media_id in keys.iter() {
             let channel = self.media_channel.get(media_id).expect("missing expected key").clone();
             let channel = channel.lock().unwrap();
