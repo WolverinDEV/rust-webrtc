@@ -24,6 +24,9 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use serde::export::Formatter;
 use std::ops::Deref;
+use crate::srtp2::Srtp2;
+use crate::utils::rtp::is_rtp_header;
+use crate::utils::rtcp::is_rtcp_header;
 
 #[derive(Clone)]
 pub struct DebugableCandidate {
@@ -64,13 +67,14 @@ pub enum PeerICEConnectionEvent {
 
     MessageReceivedDtls(Vec<u8>),
     MessageReceivedRtp(Vec<u8>),
-    MessageReceivedRctp(Vec<u8>),
+    MessageReceivedRtcp(Vec<u8>),
 }
 
 #[derive(Clone, Debug)]
 pub enum PeerICEConnectionControl {
     SendMessage(Vec<u8>),
-    SendUnencryptedMessage(Vec<u8>)
+    SendRtpMessage(Vec<u8>),
+    SendRtcpMessage(Vec<u8>)
 }
 
 #[derive(Debug)]
@@ -86,6 +90,7 @@ pub enum ICECandidateAddError {
     UnknownMediaChannel,
     RemoteCandidatesAlreadyReceived,
     FqdnNotYetSupported,
+    InvalidComponentIndex
 }
 
 enum DTLSState {
@@ -123,6 +128,8 @@ pub struct PeerICEConnection {
     dtls: Option<DTLSState>,
     /// Internal buffer for the dtls stream
     dtls_buffer: Rc<RefCell<DtlsStreamSource>>,
+
+    srtp: Option<Srtp2>
 }
 
 /* TODO: Is this required? */
@@ -246,7 +253,8 @@ impl PeerICEConnection {
             ice_stream: stream,
             dtls_buffer: Rc::new(RefCell::new(dtls_stream)),
 
-            dtls: Some(DTLSState::Uninitialized(ssl))
+            dtls: Some(DTLSState::Uninitialized(ssl)),
+            srtp: None
         };
 
         Ok(connection)
@@ -265,8 +273,12 @@ impl PeerICEConnection {
                 }
                 */
             } else {
-                self.ice_stream.add_remote_candidate(candidate);
-                Ok(())
+                if candidate.component as usize > self.ice_stream.components().len() {
+                    Err(ICECandidateAddError::InvalidComponentIndex)
+                } else {
+                    self.ice_stream.add_remote_candidate(candidate);
+                    Ok(())
+                }
             }
         } else {
             self.remote_candidates_gathered = true;
@@ -285,7 +297,13 @@ impl PeerICEConnection {
     fn process_dtls_handshake_result(&mut self, result: Result<ssl::SslStream<DtlsStream>, ssl::HandshakeError<DtlsStream>>) -> Option<PeerICEConnectionEvent> {
         match result {
             Ok(stream) => {
-                println!("DTLS Initialized");
+                match Srtp2::from_openssl(stream.ssl()) {
+                    Ok(srtp) => self.srtp = Some(srtp),
+                    Err(err) => {
+                        eprintln!("Failed to initialize srtp from openssl init: {:?}", err);
+                        /* TODO: Error handing, close the session here as we require srtp! */
+                    }
+                }
                 self.dtls = Some(DTLSState::Connected(stream));
                 Some(PeerICEConnectionEvent::DtlsInitialized())
             },
@@ -308,6 +326,43 @@ impl PeerICEConnection {
                 }
             }
         }
+    }
+
+    fn process_incoming_data(&mut self, mut data: Vec<u8>) -> Option<PeerICEConnectionEvent> {
+        if DtlsStream::is_ssl_packet(&data) {
+            self.dtls_buffer.borrow_mut().read_buffer.push_back(data);
+        } else if is_rtp_header(data.as_slice()) {
+            if let Some(srtp) = &self.srtp {
+                match srtp.unprotect(data.as_mut_slice()) {
+                    Ok(len) => {
+                        data.truncate(len);
+                        return Some(PeerICEConnectionEvent::MessageReceivedRtp(data));
+                    },
+                    Err(err) => {
+                        eprintln!("Failed to unprotect rtp packet: {:?}", err);
+                    }
+                }
+            } else {
+                eprintln!("Received SRTCP data, but we've not initialized srtp yet.");
+            }
+        } else if is_rtcp_header(data.as_slice()) {
+            if let Some(srtp) = &self.srtp {
+                match srtp.unprotect_rtcp(data.as_mut_slice()) {
+                    Ok(len) => {
+                        data.truncate(len);
+                        return Some(PeerICEConnectionEvent::MessageReceivedRtcp(data));
+                    },
+                    Err(err) => {
+                        eprintln!("Failed to unprotect rtcp packet: {:?}", err);
+                    }
+                }
+            } else {
+                eprintln!("Received SRTP data, but we've not initialized srtp yet.");
+            }
+        } else {
+            eprintln!("Received non DTLS, RTP or RTCP data. Dropping data.");
+        }
+        None
     }
 }
 
@@ -345,10 +400,8 @@ impl Stream for PeerICEConnection {
 
         while let Poll::Ready(data) = { self.ice_stream.mut_components()[0].poll_next_unpin(cx) } {
             if let Some(data) = data {
-                if DtlsStream::is_ssl_packet(&data) {
-                    self.dtls_buffer.borrow_mut().read_buffer.push_back(data);
-                } else {
-                    println!("Received non DTLS ICE data: {:?}", data);
+                if let Some(event) = self.process_incoming_data(data) {
+                    return Poll::Ready(Some(event));
                 }
             } else {
                 /* TODO: Some kind of handling and not panicking */
@@ -431,9 +484,41 @@ impl Stream for PeerICEConnection {
                         println!("Tried to send a dtls message without an active session");
                     }
                 },
-                PeerICEConnectionControl::SendUnencryptedMessage(buffer) => {
-                    let _ = self.ice_stream.mut_components()[0].send(buffer)
-                        .now_or_never().expect("unbound message sending should not error");
+                PeerICEConnectionControl::SendRtpMessage(mut buffer) => {
+                    if let Some(srtp) = &mut self.srtp {
+                        let length = buffer.len();
+                        buffer.resize(length + 148, 0xFE);
+                        match srtp.protect(buffer.as_mut_slice(), length) {
+                            Ok(length) => {
+                                buffer.truncate(length);
+                                let _ = self.ice_stream.mut_components()[0].send(buffer)
+                                    .now_or_never().expect("unbound message sending should not error");
+                            },
+                            Err(error) => {
+                                eprintln!("failed to protect rtp packet: {:?}", error);
+                            }
+                        }
+                    } else {
+                        eprintln!("tried to send rtp data, but srtp hasn't been initialized yet");
+                    }
+                },
+                PeerICEConnectionControl::SendRtcpMessage(mut buffer) => {
+                    if let Some(srtp) = &mut self.srtp {
+                        let length = buffer.len();
+                        buffer.resize(length + 148, 0);
+                        match srtp.protect_rtcp(buffer.as_mut_slice(), length) {
+                            Ok(length) => {
+                                buffer.truncate(length);
+                                let _ = self.ice_stream.mut_components()[0].send(buffer)
+                                    .now_or_never().expect("unbound message sending should not error");
+                            },
+                            Err(error) => {
+                                eprintln!("failed to protect rtcp packet: {:?}", error);
+                            }
+                        }
+                    } else {
+                        eprintln!("tried to send rtcp data, but srtp hasn't been initialized yet");
+                    }
                 }
             }
         }

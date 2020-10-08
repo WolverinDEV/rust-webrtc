@@ -13,7 +13,7 @@ use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 
 use serde::{Deserialize, Serialize};
 use webrtc_sdp::parse_sdp;
-use webrtc_sdp::attribute_type::{SdpAttribute, SdpAttributeCandidateTransport};
+use webrtc_sdp::attribute_type::{SdpAttribute, SdpAttributeCandidateTransport, SdpAttributeExtmap};
 use crate::rtc::{RtcDescriptionType, MediaIdFragment, PeerConnection, PeerConnectionEvent};
 use std::sync::{Arc};
 use futures::lock::{Mutex, MutexLockFuture};
@@ -21,14 +21,18 @@ use std::ops::DerefMut;
 use std::str::FromStr;
 use futures::task::{Poll, Context};
 use tokio::sync::mpsc;
-use crate::media::{TypedMediaChannel};
+use crate::media::{TypedMediaChannel, MediaChannel};
 use crate::media::application::{MediaChannelApplicationEvent, MediaChannelApplication};
 use crate::sctp::message::DataChannelType;
+use crate::media::audio::MediaChannelAudio;
+use crate::srtp2::srtp2_global_init;
 
 mod rtc;
 mod media;
 mod ice;
 mod sctp;
+mod srtp2;
+mod utils;
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "type", content = "payload")]
@@ -49,6 +53,7 @@ struct WebClient {
 }
 
 fn main() {
+    srtp2_global_init().expect("srtp2 init failed");
     openssl::init();
     // unsafe { libnice::sys::nice_debug_enable(1); }
     let mut runtime = tokio::runtime::Builder::new()
@@ -121,6 +126,18 @@ fn poll_application_channel(channel: &mut MediaChannelApplication, cx: &mut Cont
     }
 }
 
+fn poll_audio_channel(channel: &mut MediaChannelAudio, cx: &mut Context) {
+    while let Poll::Ready(event) = channel.poll_next_unpin(cx) {
+        if !event.is_some() {
+            /* TODO: Never poll that media channel again */
+            break;
+        }
+
+        println!("Audio channel event: {:?}", event.unwrap());
+    }
+
+}
+
 fn spawn_client_peer(client: &mut WebClient) {
     assert!(client.peer.is_none());
 
@@ -148,9 +165,8 @@ fn spawn_client_peer(client: &mut WebClient) {
                         let mut channel = channel.lock().unwrap();
 
                         match channel.as_typed() {
-                            TypedMediaChannel::Application(channel) => {
-                                poll_application_channel(channel, cx);
-                            }
+                            TypedMediaChannel::Application(channel) => poll_application_channel(channel, cx),
+                            TypedMediaChannel::Audio(channel) => poll_audio_channel(channel, cx)
                         }
                     }
 
@@ -167,7 +183,7 @@ fn spawn_client_peer(client: &mut WebClient) {
             match event.unwrap() {
                 PeerConnectionEvent::LocalIceCandidate(candidate, media_id) => {
                     if let Some(candidate) = candidate {
-                        if candidate.transport == SdpAttributeCandidateTransport::Udp {
+                        if candidate.transport == SdpAttributeCandidateTransport::Tcp {
                             tx.send(WebCommand::RtcAddIceCandidate {
                                 candidate: String::from("candidate:") + &candidate.to_string(),
                                 media_id: media_id.1,
@@ -179,7 +195,8 @@ fn spawn_client_peer(client: &mut WebClient) {
                             candidate: String::from(""),
                             media_id: media_id.1,
                             media_index: media_id.0 as u32
-                        }).expect("failed to send local candidate add");
+                        }); //.expect("failed to send local candidate add");
+                        //FIXME: This crashes on FF for some reason
                     }
                 }
             }
@@ -187,6 +204,43 @@ fn spawn_client_peer(client: &mut WebClient) {
 
         println!("Peer poll exited");
     });
+}
+
+fn configure_media_channel(channel: &mut dyn MediaChannel) -> std::result::Result<(), String> {
+    match channel.as_typed() {
+        TypedMediaChannel::Audio(channel) => {
+            let opus_codec = channel.remote_codecs()
+                .iter()
+                .find(|e| e.codec_name == "opus");
+            if opus_codec.is_none() {
+                return Err(String::from("Missing the opus codec"));
+            }
+
+            println!("Remote offered opus, we're accepting it: {:?}", &opus_codec);
+            let mut codec = opus_codec.unwrap().clone();
+            //codec.parameters = None;
+            //codec.feedback = None;
+            channel.local_codecs_mut().push(codec);
+
+            for ext in channel.remote_extensions().iter().map(|e| e.clone()).collect::<Vec<SdpAttributeExtmap>>() {
+                channel.local_extensions_mut().push(ext);
+            }
+
+            let source = channel.register_local_source();
+
+            /*
+             * Since we sadly can't name tracks we've to name the underlying media stream.
+             * But we can't name the media stream without having the cname attribute, so we're setting
+             * it to "-" as and now we can name the media stream however we want to name it.
+             */
+            let stream_name = "WolverinDEV_Is_Nice";
+            source.properties_mut().insert(String::from("cname"), Some(String::from("-")));
+            source.properties_mut().insert(String::from("msid"), Some(String::from(format!("{} -", stream_name))));
+        },
+        _ => {}
+    }
+
+    Ok(())
 }
 
 async fn handle_command(client: &mut WebClient, command: &WebCommand) -> std::result::Result<(), String> {
@@ -221,6 +275,11 @@ async fn handle_command(client: &mut WebClient, command: &WebCommand) -> std::re
             let peer = client.peer.as_ref().expect("expected a peer");
             let mut locked_peer = peer.lock().await;
             locked_peer.set_remote_description(&sdp, RtcDescriptionType::Offer).map_err(|err| format!("{:?}", err))?;
+
+            /* configure the media channels */
+            for channel in locked_peer.media_channels_mut().iter() {
+                configure_media_channel(channel.lock().unwrap().deref_mut())?;
+            }
 
             let answer = locked_peer.create_answer().map_err(|err| format!("{:?}", err))?;
             println!("Answer: {:?}", answer.to_string());

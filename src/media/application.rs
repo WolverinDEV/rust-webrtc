@@ -496,7 +496,6 @@ impl MediaChannel for MediaChannelApplication {
             amount: None
         }).unwrap();
 
-        media.add_attribute(SdpAttribute::Setup(SdpAttributeSetup::Passive)).unwrap();
         media.add_attribute(SdpAttribute::Sctpmap(SdpAttributeSctpmap{
             port: self.sctp_session.local_port,
             channels: self.max_outgoing_channel as u32

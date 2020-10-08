@@ -1,5 +1,7 @@
 let socket: WebSocket;
 let peer: RTCPeerConnection;
+let audioContext: AudioContext;
+let audioElement: HTMLAudioElement;
 
 interface WebCommand {
     RtcSetRemoteDescription: {
@@ -68,11 +70,7 @@ function sendCommand<T extends keyof WebCommand>(command: T, payload: WebCommand
     socket.send(JSON.stringify({ type: command, payload: payload }));
 }
 
-async function initializePeer() {
-    peer = new RTCPeerConnection({
-        iceServers: [ { urls: ["stun:stun.l.google.com:19302"] } ]
-    });
-    (window as any).peer = peer;
+function initializePeerApplication(peer: RTCPeerConnection) {
     {
         const channel = peer.createDataChannel("test", { ordered: false });
         channel.onopen = () => {
@@ -96,6 +94,28 @@ async function initializePeer() {
     }, 1000);
     */
 
+    peer.ondatachannel = event => {
+        console.log("[DC ] Remote host opened data channel %s", event.channel.label);
+    };
+}
+
+async function initializePeerAudio(peer: RTCPeerConnection) {
+    const microphoneStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+            echoCancellation: false,
+            noiseSuppression: false
+        }
+    });
+    microphoneStream.getAudioTracks().forEach(track => peer.addTrack(track));
+    //audioContext.createMediaStreamSource(microphoneStream).connect(audioContext.destination);
+}
+
+async function initializePeer() {
+    peer = new RTCPeerConnection({
+        iceServers: [ { urls: ["stun:stun.l.google.com:19302"] } ]
+    });
+    (window as any).peer = peer;
+
     peer.oniceconnectionstatechange = () => console.log("[ICE] Connection state changed to %s", peer.iceConnectionState);
     peer.onicegatheringstatechange = () => console.log("[ICE] Gathering state changed to %s", peer.iceGatheringState);
     peer.onconnectionstatechange = () => console.log("[PC ] Connection state changed to %s", peer.connectionState);
@@ -116,11 +136,39 @@ async function initializePeer() {
         }
     }
 
-    peer.ondatachannel = event => {
-        console.log("[DC ] Remote host opened data channel %s", event.channel.label);
+    peer.ontrack = event => {
+        console.error("Streams: %o", event.streams);
+        console.log("[AUD] Received remote %s track %s (%s) %s", event.track.kind, event.track.id, event.track.label, event.streams[0]?.id);
+        event.track.onmute = () => console.log("[AUD] Muted %s", event.track.id);
+        event.track.onunmute = () => console.log("[AUD] Unmute %s", event.track.id);
+        event.track.onended = () => console.log("[AUD] Ended %s", event.track.id);
+        event.track.onisolationchange = () => console.log("[AUD] Isolationchange %s", event.track.id);
+
+        const mstream = new MediaStream();
+        (window as any).track = event.track;
+        mstream.addTrack(event.track);
+        let stream = audioContext.createMediaStreamSource(mstream);
+        stream.connect(audioContext.destination);
+
+        audioElement = new Audio();
+        document.body.append(audioElement);
+        audioElement.srcObject = mstream;
+        audioElement.autoplay = true;
+        audioElement.muted = true;
+        (window as any).audioElement = audioElement;
+
+        if(event.streams[0]) {
+            let stream = audioContext.createMediaStreamSource(event.streams[0]);
+            //stream.connect(audioContext.destination);
+        }
     };
 
-    const offer = await peer.createOffer({ offerToReceiveAudio: false, /* offerToReceiveVideo: true, voiceActivityDetection: true */ });
+    const kEnableAudio = true;
+    if(kEnableAudio) {
+        await initializePeerAudio(peer);
+    }
+
+    const offer = await peer.createOffer({ offerToReceiveAudio: kEnableAudio, /* offerToReceiveVideo: true, voiceActivityDetection: true */ });
     await peer.setLocalDescription(offer);
 
     console.log("[SDP] Offer:\n%s", offer.sdp);
@@ -129,6 +177,21 @@ async function initializePeer() {
 }
 
 async function main() {
+    audioContext = new AudioContext();
+    (window as any).audioContext = audioContext;
+
+    if(audioContext.state === "suspended") {
+        await new Promise((resolve, reject) => {
+            console.error("CLICK SOMEWHERE ON THE PAGE TO CONTINUE!");
+            const callback = () => {
+                console.error("Resume");
+                document.removeEventListener("mousedown", callback);
+                audioContext.resume().then(resolve).catch(reject);
+            };
+            document.addEventListener("mousedown", callback);
+        });
+    }
+
     await connect();
     await initializePeer();
 }

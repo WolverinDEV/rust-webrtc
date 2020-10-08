@@ -528,6 +528,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "libsrtp2-sys"
+version = "0.1.0"
+dependencies = [
+ "bindgen",
+]
+
+[[package]]
 name = "libusrsctp-sys"
 version = "0.1.0"
 dependencies = [
@@ -855,6 +862,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e005d658ad26eacc2b6c506dfde519f4e277e328d0eb3379ca61647d70a8f531"
 
 [[package]]
+name = "rtp-rs"
+version = "0.5.0"
+
+[[package]]
 name = "rustc-hash"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1149,9 +1160,12 @@ dependencies = [
  "lazy_static",
  "libc",
  "libnice",
+ "libsrtp2-sys",
  "libusrsctp-sys",
  "openssl",
+ "rand",
  "retain_mut",
+ "rtp-rs",
  "serde",
  "serde_json",
  "tokio",

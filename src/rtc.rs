@@ -3,7 +3,7 @@
 use glib::{MainContext, BoolError};
 use webrtc_sdp::media_type::{SdpMediaValue};
 use std::sync::{Arc, Mutex};
-use webrtc_sdp::attribute_type::{SdpAttributeType, SdpAttribute, SdpAttributeSetup};
+use webrtc_sdp::attribute_type::{SdpAttributeType, SdpAttribute, SdpAttributeSetup, SdpAttributeMsidSemantic};
 use std::fmt::Debug;
 use futures::{FutureExt, StreamExt};
 use libnice::ice::{Candidate};
@@ -13,7 +13,6 @@ use std::rc::Rc;
 use std::cell::{RefCell, RefMut};
 use crate::media;
 use std::collections::HashMap;
-use crate::media::{MediaChannel};
 use crate::ice::{PeerICEConnection, ICEConnectionInitializeError, ICECredentials, PeerICEConnectionEvent, ICECandidateAddError};
 use webrtc_sdp::{SdpSession, SdpOrigin, SdpTiming};
 use webrtc_sdp::address::ExplicitlyTypedAddress;
@@ -21,6 +20,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use libnice::ffi::{NiceCompatibility, NiceAgentProperty};
 use libnice::sys::NiceAgentOption_NICE_AGENT_OPTION_ICE_TRICKLE;
 use crate::media::application::MediaChannelApplication;
+use crate::media::audio::MediaChannelAudio;
 
 /// The default setup type if the remote peer offers active and passive setup
 /// Allowed values are only `SdpAttributeSetup::Passive` and `SdpAttributeSetup::Active`
@@ -83,6 +83,7 @@ pub struct PeerConnection {
     ice_agent: libnice::ice::Agent,
     ice_channels: Vec<Rc<RefCell<PeerICEConnection>>>,
 
+    origin_username: String,
     media_channel: HashMap<MediaId, Arc<Mutex<dyn media::MediaChannel>>>
 }
 
@@ -168,6 +169,9 @@ impl PeerConnection {
         let mut connection = PeerConnection{
             state: PeerConnectionState::New,
 
+            /* "-" indicates no username */
+            origin_username: String::from("-"),
+
             ice_agent: libnice::ice::Agent::new_full(event_loop, NiceCompatibility::RFC5245, NiceAgentOption_NICE_AGENT_OPTION_ICE_TRICKLE),
             ice_channels: Vec::with_capacity(8),
 
@@ -193,6 +197,9 @@ impl PeerConnection {
             return Err(RemoteDescriptionApplyError::UnsupportedMode);
         }
 
+        /* copy the origin username and send it back, required for mozilla for example */
+        self.origin_username = session.origin.username.clone();
+
         /* TODO: Proper reset everything? */
         self.media_channel.clear();
         self.ice_channels.clear();
@@ -202,57 +209,58 @@ impl PeerConnection {
             let media = &session.media[media_index as usize];
             let media_id: MediaId = (media_index, get_attribute_value!(media, media_index, Mid)?.clone());
 
+            let credentials = ICECredentials {
+                username: get_attribute_value!(media, media_index, IceUfrag)?.clone(),
+                password: get_attribute_value!(media, media_index, IcePwd)?.clone()
+            };
+
+            println!("Remote credentials: {:?}", &credentials);
+            let setup = get_attribute_value!(media, media_index, Setup)?;
+            let local_setup = {
+                match setup {
+                    SdpAttributeSetup::Passive => Ok(SdpAttributeSetup::Active),
+                    SdpAttributeSetup::Active => Ok(SdpAttributeSetup::Passive),
+                    SdpAttributeSetup::Actpass => Ok(ACT_PASS_DEFAULT_SETUP_TYPE),
+                    _ => Err(RemoteDescriptionApplyError::IceSetupUnsupported { media_index })
+                }
+            }?;
+
+            let ice_channel = self.create_ice_channel(&credentials, media_id.clone(), local_setup)?;
+            let mut ice_channel_mut = RefCell::borrow_mut(&ice_channel);
+
+            if ice_channel_mut.owning_media_id.0 == media_index {
+                /* yeahr it's our channel */
+                for candidate in media.get_attributes_of_type(SdpAttributeType::Candidate)
+                    .iter()
+                    .map(|attribute| if let SdpAttribute::Candidate(c) = attribute { c } else { panic!("expected a candidate") }) {
+
+                    ice_channel_mut.add_remote_candidate(Some(candidate))
+                        .map_err(|err| RemoteDescriptionApplyError::InternalError { detail: String::from(format!("failed to add candidate: {:?}", err)) })?;
+                }
+
+                /* /* Firefox does not sends this stuff */
+                let is_trickle = media.get_attribute(SdpAttributeType::IceOptions)
+                    .map(|attribute| if let SdpAttribute::IceOptions(opts) = attribute { opts } else { panic!("expected a ice options") })
+                    .map_or(false, |attributes| attributes.iter().find(|attribute| attribute.as_str() == "trickle").is_some());
+                if media.get_attribute(SdpAttributeType::EndOfCandidates).is_some() {
+                    if is_trickle {
+                        return Err(RemoteDescriptionApplyError::InvalidSdp { reason: String::from("found end-of-candidates but the ice mode is expected to be trickle") });
+                    }
+                } else {
+                    if !is_trickle {
+                        return Err(RemoteDescriptionApplyError::InvalidSdp { reason: String::from("missing end-of-candidates but the ice mode is trickle") });
+                    }
+                }
+                */
+            }
+            ice_channel_mut.register_media_channel(&media_id);
+
             let channel = match *media.get_type() {
                 SdpMediaValue::Application => {
-                    let credentials = ICECredentials {
-                        username: get_attribute_value!(media, media_index, IceUfrag)?.clone(),
-                        password: get_attribute_value!(media, media_index, IcePwd)?.clone()
-                    };
-
-                    println!("Remote credentials: {:?}", &credentials);
-
-                    let setup = get_attribute_value!(media, media_index, Setup)?;
-                    let local_setup = {
-                        match setup {
-                            SdpAttributeSetup::Passive => Ok(SdpAttributeSetup::Active),
-                            SdpAttributeSetup::Active => Ok(SdpAttributeSetup::Passive),
-                            SdpAttributeSetup::Actpass => Ok(ACT_PASS_DEFAULT_SETUP_TYPE),
-                            _ => Err(RemoteDescriptionApplyError::IceSetupUnsupported { media_index })
-                        }
-                    }?;
-
-                    let ice_channel = self.create_ice_channel(&credentials, media_id.clone(), local_setup)?;
-                    let mut ice_channel_mut = RefCell::borrow_mut(&ice_channel);
-
-                    if ice_channel_mut.owning_media_id.0 == media_index {
-                        /* yeahr it's our channel */
-                        for candidate in media.get_attributes_of_type(SdpAttributeType::Candidate)
-                            .iter()
-                            .map(|attribute| if let SdpAttribute::Candidate(c) = attribute { c } else { panic!("expected a candidate") }) {
-
-                            ice_channel_mut.add_remote_candidate(Some(candidate))
-                                .map_err(|err| RemoteDescriptionApplyError::InternalError { detail: String::from(format!("failed to add candidate: {:?}", err)) })?;
-                        }
-
-                        /* /* Firefox does not sends this stuff */
-                        let is_trickle = media.get_attribute(SdpAttributeType::IceOptions)
-                            .map(|attribute| if let SdpAttribute::IceOptions(opts) = attribute { opts } else { panic!("expected a ice options") })
-                            .map_or(false, |attributes| attributes.iter().find(|attribute| attribute.as_str() == "trickle").is_some());
-                        if media.get_attribute(SdpAttributeType::EndOfCandidates).is_some() {
-                            if is_trickle {
-                                return Err(RemoteDescriptionApplyError::InvalidSdp { reason: String::from("found end-of-candidates but the ice mode is expected to be trickle") });
-                            }
-                        } else {
-                            if !is_trickle {
-                                return Err(RemoteDescriptionApplyError::InvalidSdp { reason: String::from("missing end-of-candidates but the ice mode is trickle") });
-                            }
-                        }
-                        */
-                    }
-                    ice_channel_mut.register_media_channel(&media_id);
-                    let media_channel = Arc::new(Mutex::new(MediaChannelApplication::new(media_id.clone(), ice_channel_mut.control_sender.clone())));
-
-                    Ok(media_channel)
+                    Ok(Arc::new(Mutex::new(MediaChannelApplication::new(media_id.clone(), ice_channel_mut.control_sender.clone()))) as Arc<Mutex<dyn media::MediaChannel>>)
+                },
+                SdpMediaValue::Audio => {
+                    Ok(Arc::new(Mutex::new(MediaChannelAudio::new(media_id.clone(), ice_channel_mut.control_sender.clone()))) as Arc<Mutex<dyn media::MediaChannel>>)
                 },
                 _ => {
                     Err(RemoteDescriptionApplyError::UnsupportedMediaType { media_index })
@@ -261,6 +269,7 @@ impl PeerConnection {
 
             channel.lock().unwrap().configure(media)
                 .map_err(|err| RemoteDescriptionApplyError::MediaChannelConfigure{ error: err })?;
+
             self.media_channel.insert(media_id, channel);
         }
 
@@ -269,13 +278,13 @@ impl PeerConnection {
 
     pub fn create_answer(&mut self) -> Result<SdpSession, CreateAnswerError> {
         let mut answer = SdpSession::new(0, SdpOrigin {
-            session_id: 0,
+            session_id: rand::random(),
             session_version: 2,
             unicast_addr: ExplicitlyTypedAddress::Ip(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
-            username: String::from('-'), /* - indicates no username */
-        }, String::from("-"));  /* - indicates no named session id */
+            username: self.origin_username.clone()
+        }, String::from("-")); /* "-" indicates no session id */
         answer.timing = Some(SdpTiming{ start: 0, stop: 0 }); /* required by WebRTC */
-
+        answer.add_attribute(SdpAttribute::MsidSemantic(SdpAttributeMsidSemantic{ semantic: String::from("WMS"), msids: vec![String::from("janus")] })).unwrap();
         let mut keys = self.media_channel.keys().map(|e| e.clone()).collect::<Vec<MediaId>>();
         keys.sort_by_key(|e| e.0);
 
@@ -296,6 +305,7 @@ impl PeerConnection {
             media.add_attribute(SdpAttribute::IcePwd(ice_channel.local_credentials.password.clone())).unwrap();
             media.add_attribute(SdpAttribute::IceOptions(vec![String::from("trickle")])).unwrap();
             media.add_attribute(SdpAttribute::Fingerprint(ice_channel.fingerprint.clone())).unwrap();
+            media.add_attribute(SdpAttribute::Setup(ice_channel.setup.clone())).unwrap();
 
             answer.media.push(media);
         }

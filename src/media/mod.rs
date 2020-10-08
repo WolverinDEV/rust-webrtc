@@ -2,11 +2,14 @@ use crate::media::application::MediaChannelApplication;
 use crate::rtc::MediaId;
 use webrtc_sdp::media_type::SdpMedia;
 use crate::ice::PeerICEConnectionEvent;
+use crate::media::audio::MediaChannelAudio;
 
 pub mod application;
+pub mod audio;
 
 pub enum TypedMediaChannel<'a> {
-    Application(&'a mut MediaChannelApplication)
+    Application(&'a mut MediaChannelApplication),
+    Audio(&'a mut MediaChannelAudio)
 }
 
 pub trait MediaChannel {
