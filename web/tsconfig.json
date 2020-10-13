@@ -4,6 +4,7 @@
     "noImplicitAny": false,
     "module": "es6",
     "target": "es5",
+    "moduleResolution": "Node",
     "jsx": "react",
     "allowJs": true,
     "lib": [

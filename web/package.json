@@ -14,5 +14,9 @@
     "webpack": "^4.44.2",
     "webpack-cli": "^3.3.12",
     "webpack-dev-server": "^3.11.0"
+  },
+  "dependencies": {
+    "open-simplex-noise": "^2.4.0-pre4",
+    "simplex-noise": "^2.4.0"
   }
 }

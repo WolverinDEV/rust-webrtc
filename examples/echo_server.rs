@@ -3,7 +3,7 @@
 #![feature(try_trait)]
 
 use std::net::{SocketAddr};
-use futures::{StreamExt, SinkExt, FutureExt};
+use futures::{StreamExt, SinkExt};
 use futures::future::{Either};
 use tokio_tungstenite::tungstenite::{Message};
 use tokio_tungstenite::WebSocketStream;
@@ -157,7 +157,7 @@ fn poll_video_channel(channel: &mut MediaChannelVideo, cx: &mut Context) {
                         println!("RTCP RR: {:?}", report);
                         let mut report = report.clone();
                         report.ssrc = channel.local_sources().first().unwrap().id();
-                        channel.send_control_data(RtcpPacket::ReceiverReport(report));
+                        //channel.send_control_data(RtcpPacket::ReceiverReport(report));
                     },
                     _ => {
                         println!("Any RTCP packet: {:?}", packet);
@@ -206,13 +206,11 @@ fn spawn_client_peer(client: &mut Client<ClientData>) {
             match event.unwrap() {
                 PeerConnectionEvent::LocalIceCandidate(candidate, media_id) => {
                     if let Some(candidate) = candidate {
-                        if candidate.transport == SdpAttributeCandidateTransport::Tcp {
-                            tx.send(WebCommand::RtcAddIceCandidate {
-                                candidate: String::from("candidate:") + &candidate.to_string(),
-                                media_id: media_id.1,
-                                media_index: media_id.0 as u32
-                            }).expect("failed to send local candidate add");
-                        }
+                        tx.send(WebCommand::RtcAddIceCandidate {
+                            candidate: String::from("candidate:") + &candidate.to_string(),
+                            media_id: media_id.1,
+                            media_index: media_id.0 as u32
+                        }).expect("failed to send local candidate add");
                     } else {
                         tx.send(WebCommand::RtcAddIceCandidate {
                             candidate: String::from(""),

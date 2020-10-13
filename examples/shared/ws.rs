@@ -5,8 +5,6 @@ use tokio::sync::mpsc;
 use std::net::SocketAddr;
 use tokio_tungstenite::{WebSocketStream, tungstenite};
 use tokio::net::{TcpStream, TcpListener};
-use std::sync::Arc;
-use std::cell::RefCell;
 use serde::{Deserialize, Serialize};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
@@ -127,7 +125,6 @@ impl<ClientData: Default + Unpin> Client<ClientData> {
         if let ClientSocket::Connected(stream) = &mut self.socket {
             stream.as_mut().unwrap().start_send_unpin(Message::Close(reason.map(|msg| msg.into_owned())));
             self.socket = ClientSocket::Closing(stream.take());
-            /* TODO: Call waker to poll for the close */
         } else {
             eprintln!("Tried to send a message to a not connected client");
         }

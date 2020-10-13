@@ -414,12 +414,21 @@ impl PeerConnection {
                 None
             },
             PeerICEConnectionEvent::MessageReceivedRtcp(message) => {
-                match RtcpPacket::parse(&message) {
-                    Ok(packet) => {
-                        self.dispatch_media_event(ice, MediaChannelIncomingEvent::RtcpPacketReceived(packet));
-                    },
-                    Err(error) => {
-                        eprintln!("Failed to decode RTCP packet: {:?}", error);
+                let mut packets = [&[0u8][..]; 128];
+                let packet_count = RtcpPacket::split_up_packets(message.as_slice(), &mut packets[..]);
+                if let Err(error) = packet_count {
+                    eprintln!("Received invalid merged packet: {:?}", error);
+                    return None;
+                }
+
+                for index in 0..packet_count.unwrap() {
+                    match RtcpPacket::parse(packets[index]) {
+                        Ok(packet) => {
+                            self.dispatch_media_event(ice, MediaChannelIncomingEvent::RtcpPacketReceived(packet));
+                        },
+                        Err(error) => {
+                            eprintln!("Failed to decode RTCP packet: {:?}", error);
+                        }
                     }
                 }
                 None

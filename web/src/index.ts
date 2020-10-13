@@ -1,3 +1,5 @@
+import {VirtualCamera} from "./VirtualCamera";
+
 let socket: WebSocket;
 let peer: RTCPeerConnection;
 let audioContext: AudioContext;
@@ -122,12 +124,31 @@ function showVideoStream(stream: MediaStream) {
     document.body.append(element);
 }
 
+let virtualCamera: VirtualCamera;
+async function createVirtualCameraStream() : Promise<MediaStream> {
+    if(!virtualCamera) {
+        let scale = 0.3;
+        virtualCamera = new VirtualCamera(30, { height: 1024 * scale, width: 1024 * scale });
+        virtualCamera.start();
+        (window as any).virtualCamera = virtualCamera;
+    }
+
+    return virtualCamera.getMediaStream();
+}
+
 async function initializePeerVideo(peer: RTCPeerConnection) {
-    const camaraStream = await navigator.mediaDevices.getUserMedia({
-        video: true
-    });
-    camaraStream.getVideoTracks().forEach(track => peer.addTrack(track));
-    showVideoStream(camaraStream);
+    let stream: MediaStream;
+    try {
+        stream = await navigator.mediaDevices.getUserMedia({
+            video: true
+        });
+    } catch (error) {
+        console.warn("Failed to get camera input, using virtual camera instead (%o)", error);
+        stream = await createVirtualCameraStream();
+    }
+
+    stream.getVideoTracks().forEach(track => peer.addTrack(track));
+    showVideoStream(stream);
     //audioContext.createMediaStreamSource(microphoneStream).connect(audioContext.destination);
 }
 

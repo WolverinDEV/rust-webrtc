@@ -22,7 +22,7 @@ const SRTP_AESGCM128_MASTER_LENGTH: usize = SRTP_AESGCM128_MASTER_KEY_LENGTH + S
 const SRTP_AEAD_AES_256_GCM: u32 = 0x0008;
 const SRTP_AESGCM256_MASTER_KEY_LENGTH: usize = 32;
 const SRTP_AESGCM256_MASTER_SALT_LENGTH: usize = 12;
-const SRTP_AESGCM256_MASTER_LENGTH: usize = SRTP_AESGCM256_MASTER_KEY_LENGTH + SRTP_AESGCM256_MASTER_SALT_LENGT;
+const SRTP_AESGCM256_MASTER_LENGTH: usize = SRTP_AESGCM256_MASTER_KEY_LENGTH + SRTP_AESGCM256_MASTER_SALT_LENGTH;
 
 /// A wrapper around the Srtp2 error codes
 #[derive(Debug, Copy, Clone, PartialOrd, PartialEq)]
@@ -221,8 +221,8 @@ impl Srtp2 {
         remote_policy.allow_repeat_tx = 0;
 
         let (key_length, salt_length, master_length) = {
-            match profile.id() {
-                SrtpProfileId::SRTP_AES128_CM_SHA1_80 => {
+            match (profile.id(), profile.id().as_raw()) {
+                (SrtpProfileId::SRTP_AES128_CM_SHA1_80, _) => {
                     unsafe {
                         ffi::srtp_crypto_policy_set_rtp_default(&mut local_policy.rtp);
                         ffi::srtp_crypto_policy_set_rtp_default(&mut local_policy.rtcp);
@@ -232,7 +232,7 @@ impl Srtp2 {
                     }
                     Ok((SRTP_MASTER_KEY_LENGTH, SRTP_MASTER_SALT_LENGTH, SRTP_MASTER_LENGTH))
                 },
-                SrtpProfileId::SRTP_AES128_CM_SHA1_32 => {
+                (SrtpProfileId::SRTP_AES128_CM_SHA1_32, _) => {
                     unsafe {
                         // RTP HMAC is shortened to 32 bits, but RTCP remains 80 bits.
                         ffi::srtp_crypto_policy_set_aes_cm_128_hmac_sha1_32(&mut local_policy.rtp);
@@ -244,7 +244,7 @@ impl Srtp2 {
 
                     Ok((SRTP_MASTER_KEY_LENGTH, SRTP_MASTER_SALT_LENGTH, SRTP_MASTER_LENGTH))
                 },
-                SRTP_AEAD_AES_128_GCM => {
+                (_, SRTP_AEAD_AES_128_GCM) => {
                     unsafe {
                         ffi::srtp_crypto_policy_set_aes_gcm_128_16_auth(&mut local_policy.rtp);
                         ffi::srtp_crypto_policy_set_aes_gcm_128_16_auth(&mut local_policy.rtcp);
@@ -255,7 +255,7 @@ impl Srtp2 {
 
                     Ok((SRTP_AESGCM128_MASTER_KEY_LENGTH, SRTP_AESGCM128_MASTER_SALT_LENGTH, SRTP_AESGCM128_MASTER_LENGTH))
                 },
-                SRTP_AEAD_AES_256_GCM => {
+                (_, SRTP_AEAD_AES_256_GCM) => {
                     unsafe {
                         ffi::srtp_crypto_policy_set_aes_gcm_256_16_auth(&mut local_policy.rtp);
                         ffi::srtp_crypto_policy_set_aes_gcm_256_16_auth(&mut local_policy.rtcp);

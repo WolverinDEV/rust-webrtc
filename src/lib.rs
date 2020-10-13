@@ -1,3 +1,5 @@
+#![feature(seek_convenience)]
+
 use crate::srtp2::srtp2_global_init;
 
 pub mod rtc;

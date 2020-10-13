@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::io::{Cursor, Read, Result, Error, Write};
+use std::io::{Cursor, Read, Result, Error, Write, Seek, SeekFrom};
 use byteorder::{ReadBytesExt, BigEndian, WriteBytesExt};
 use futures::io::ErrorKind;
 use std::fmt::Debug;
@@ -22,10 +22,7 @@ fn read_profile_data(reader: &mut Cursor<&[u8]>, profile_data_length_with_paddin
         Ok(None)
     } else {
         let mut buffer = Vec::new();
-        if reader.read_to_end(&mut buffer)? != profile_data_length_with_padding {
-            /* TODO: For some reason the video RR packets do not fit this contraint if a frame got lost */
-            //return Err(Error::new(ErrorKind::InvalidInput, "given packet length was too long"));
-        }
+        reader.read_exact(buffer.as_mut_slice())?;
 
         if padded {
             /* packet has been padded */
@@ -461,6 +458,35 @@ pub enum RtcpPacket {
 }
 
 impl RtcpPacket {
+    pub fn split_up_packets<'a>(buffer: &'a[u8], packets: &mut [&'a [u8]]) -> Result<usize> {
+        let mut reader = Cursor::new(buffer);
+
+        let mut packet_offset = 0usize;
+        let mut packet_count = 0usize;
+        loop {
+            let available = reader.stream_len()? - reader.stream_position()?;
+            if available == 0 { break; }
+
+            if packets.len() - packet_count == 0 {
+                return Err(Error::new(ErrorKind::InvalidInput, "buffer contains more packets than expected"));
+            }
+
+            reader.seek(SeekFrom::Current(2));
+            let length = reader.read_u16::<BigEndian>()?;
+            if length as u64 * 4 > available - 4 {
+                return Err(Error::new(ErrorKind::InvalidInput, "packet length invalid"));
+            }
+            reader.seek(SeekFrom::Current(length as i64 * 4));
+
+            let packet_end = packet_offset + length as usize * 4 + 4;
+            packets[packet_count] = &buffer[packet_offset..packet_end];
+            packet_count = packet_count + 1;
+            packet_offset = packet_end;
+        }
+
+        Ok(packet_count)
+    }
+
     pub fn parse(buffer: &[u8]) -> Result<RtcpPacket> {
         if buffer.len() < 2 {
             return Err(Error::new(ErrorKind::InvalidInput, "truncated packet"));
