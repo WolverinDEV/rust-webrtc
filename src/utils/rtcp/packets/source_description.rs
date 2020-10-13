@@ -215,7 +215,9 @@ impl SourceDescription {
 
 #[derive(Clone, Debug)]
 pub struct RtcpPacketSourceDescription {
-    descriptions: Vec<(u32, SourceDescription)>
+    pub descriptions: Vec<(u32, SourceDescription)>,
+    /// This field is not in a RFC, but Firefox somehow sends extra data
+    pub profile_data: Option<Vec<u8>>
 }
 
 impl RtcpPacketSourceDescription {
@@ -230,7 +232,7 @@ impl RtcpPacketSourceDescription {
         }
 
         let source_count = (info & 0x3F) as usize;
-        let _ = reader.read_u16::<BigEndian>()?; /* the total packet length */
+        let length = reader.read_u16::<BigEndian>()? as usize * 4 + 4; /* the total packet length */
 
         let mut descriptions = Vec::with_capacity(source_count);
         for _ in 0..source_count {
@@ -238,11 +240,18 @@ impl RtcpPacketSourceDescription {
             descriptions.push((ssrc, SourceDescription::parse(reader)?));
         }
 
-        Ok(RtcpPacketSourceDescription { descriptions })
+        let mut result = RtcpPacketSourceDescription {
+            descriptions,
+            profile_data: None
+        };
+        result.profile_data = read_profile_data(reader, length - result.byte_size(), (info & 0x40) != 0)?;
+
+        Ok(result)
     }
 
     pub fn byte_size(&self) -> usize {
-        4 + self.descriptions.iter().map(|e| e.1.byte_size() + 4).sum::<usize>()
+        4 + self.descriptions.iter().map(|e| e.1.byte_size() + 4).sum::<usize>() +
+            if let Some(data) = &self.profile_data { data.len() } else { 0 }
     }
 
     pub fn write(&self, writer: &mut Cursor<&mut [u8]>) -> Result<()> {
@@ -250,18 +259,23 @@ impl RtcpPacketSourceDescription {
             return Err(Error::new(ErrorKind::InvalidData, "can't write more than 15 descriptions"));
         }
 
-        let payload_length = self.descriptions.iter().map(|e| e.1.byte_size() + 4).sum::<usize>();
-
         let mut info = 2 << 6;
+        if let Some(payload) = &self.profile_data {
+            if (payload.len() % 4) != 0 {
+                info |= 1 << 5; /* we've to do some padding */
+            }
+        }
         info |= self.descriptions.len();
         writer.write_u8(info as u8)?;
         writer.write_u8(RtcpPacketType::SourceDescription.value())?;
-        writer.write_u16::<BigEndian>(((payload_length + 3) / 4) as u16)?;
+        writer.write_u16::<BigEndian>(((self.byte_size() + 3) / 4) as u16 - 1)?;
 
         for (ssrc, description) in &self.descriptions {
             writer.write_u32::<BigEndian>(*ssrc)?;
             description.write(writer)?;
         }
+
+        write_profile_data(writer, &self.profile_data, true)?;
         Ok(())
     }
 }
