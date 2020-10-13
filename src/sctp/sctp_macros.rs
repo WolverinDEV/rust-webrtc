@@ -12,6 +12,31 @@ pub const SCTP_FUTURE_ASSOC: u32   = 0;
 pub const SCTP_CURRENT_ASSOC: u32  = 1;
 pub const SCTP_ALL_ASSOC: u32      = 2;
 
+
+/* Flags that go into the sinfo->sinfo_flags field */
+/// tail part of the message could not be sent
+pub const SCTP_DATA_LAST_FRAG   : u16 = 0x0001;
+/// complete message could not be sent
+pub const SCTP_DATA_NOT_FRAG    : u16 = 0x0003;
+/// next message is a notification
+pub const SCTP_NOTIFICATION     : u16 = 0x0010;
+/// next message is complete
+pub const SCTP_COMPLETE         : u16 = 0x0020;
+/// Start shutdown procedures
+pub const SCTP_EOF              : u16 = 0x0100;
+/// Send an ABORT to peer
+pub const SCTP_ABORT            : u16 = 0x0200;
+/// Message is un-ordered
+pub const SCTP_UNORDERED        : u16 = 0x0400;
+/// Override the primary-address
+pub const SCTP_ADDR_OVER        : u16 = 0x0800;
+/// Send this on all associations
+pub const SCTP_SENDALL          : u16 = 0x1000;
+/// end of message signal
+pub const SCTP_EOR              : u16 = 0x2000;
+///Set I-Bit
+pub const SCTP_SACK_IMMEDIATELY : u16 = 0x4000;
+
 /*
  * user socket options: socket API defined
  */

@@ -8,7 +8,7 @@ use webrtc_sdp::attribute_type::{SdpAttribute, SdpAttributeSetup, SdpAttributeSc
 use webrtc_sdp::SdpConnection;
 use webrtc_sdp::address::ExplicitlyTypedAddress;
 use std::net::{IpAddr, Ipv4Addr};
-use crate::sctp::{UsrSctpSession, UsrSctpSessionEvent, SctpSendInfo, SCTP_EOR, SCTP_UNORDERED};
+use crate::sctp::{UsrSctpSession, UsrSctpSessionEvent, SctpSendInfo};
 use futures::task::{Context, Poll, Waker};
 use tokio::macros::support::Pin;
 use futures::{StreamExt, Stream};
@@ -21,7 +21,7 @@ use std::collections::{VecDeque, BTreeMap};
 use futures::io::ErrorKind;
 use crate::sctp::notification::{SctpNotificationType, SctpNotification, SctpNotificationStreamReset, SctpNotificationAssocChange, SctpSacState};
 use crate::sctp::message::{DataChannelMessage as RawDataChannelMessage, DataChannelType, DataChannelControlMessage, DataChannelControlMessageOpenAck, DataChannelControlMessageOpen};
-use crate::sctp::sctp_macros::{SCTP_ALL_ASSOC, SCTP_STREAM_RESET_DENIED, SCTP_STREAM_RESET_FAILED, SCTP_STREAM_RESET_INCOMING_SSN, SPP_PMTUD_ENABLE, SPP_PMTUD_DISABLE};
+use crate::sctp::sctp_macros::{SCTP_ALL_ASSOC, SCTP_STREAM_RESET_DENIED, SCTP_STREAM_RESET_FAILED, SCTP_STREAM_RESET_INCOMING_SSN, SPP_PMTUD_ENABLE, SPP_PMTUD_DISABLE, SCTP_EOR, SCTP_UNORDERED};
 
 /// Events which are emitted by the `MediaChannelApplication`.
 #[derive(Debug, PartialEq)]

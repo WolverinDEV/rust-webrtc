@@ -11,15 +11,18 @@ use std::pin::Pin;
 /* cipher_key_length: 128 bits / 16 bytes, cipher_salt_length: 112 bits / 14 bytes */
 const SRTP_MASTER_KEY_LENGTH: usize = 16;
 const SRTP_MASTER_SALT_LENGTH: usize = 14;
-const SRTP_MASTER_LENGTH: usize = (SRTP_MASTER_KEY_LENGTH + SRTP_MASTER_SALT_LENGTH);
+const SRTP_MASTER_LENGTH: usize = SRTP_MASTER_KEY_LENGTH + SRTP_MASTER_SALT_LENGTH;
 
 /* AES-GCM stuff (http://tools.ietf.org/html/rfc7714) */
+const SRTP_AEAD_AES_128_GCM: u32 = 0x0007;
 const SRTP_AESGCM128_MASTER_KEY_LENGTH: usize = 16;
 const SRTP_AESGCM128_MASTER_SALT_LENGTH: usize = 12;
-const SRTP_AESGCM128_MASTER_LENGTH: usize = (SRTP_AESGCM128_MASTER_KEY_LENGTH + SRTP_AESGCM128_MASTER_SALT_LENGTH);
+const SRTP_AESGCM128_MASTER_LENGTH: usize = SRTP_AESGCM128_MASTER_KEY_LENGTH + SRTP_AESGCM128_MASTER_SALT_LENGTH;
+
+const SRTP_AEAD_AES_256_GCM: u32 = 0x0008;
 const SRTP_AESGCM256_MASTER_KEY_LENGTH: usize = 32;
 const SRTP_AESGCM256_MASTER_SALT_LENGTH: usize = 12;
-const SRTP_AESGCM256_MASTER_LENGTH: usize = (SRTP_AESGCM256_MASTER_KEY_LENGTH + SRTP_AESGCM256_MASTER_SALT_LENGTH);
+const SRTP_AESGCM256_MASTER_LENGTH: usize = SRTP_AESGCM256_MASTER_KEY_LENGTH + SRTP_AESGCM256_MASTER_SALT_LENGT;
 
 /// A wrapper around the Srtp2 error codes
 #[derive(Debug, Copy, Clone, PartialOrd, PartialEq)]
@@ -240,6 +243,28 @@ impl Srtp2 {
                     }
 
                     Ok((SRTP_MASTER_KEY_LENGTH, SRTP_MASTER_SALT_LENGTH, SRTP_MASTER_LENGTH))
+                },
+                SRTP_AEAD_AES_128_GCM => {
+                    unsafe {
+                        ffi::srtp_crypto_policy_set_aes_gcm_128_16_auth(&mut local_policy.rtp);
+                        ffi::srtp_crypto_policy_set_aes_gcm_128_16_auth(&mut local_policy.rtcp);
+
+                        ffi::srtp_crypto_policy_set_aes_gcm_128_16_auth(&mut remote_policy.rtp);
+                        ffi::srtp_crypto_policy_set_aes_gcm_128_16_auth(&mut remote_policy.rtcp);
+                    }
+
+                    Ok((SRTP_AESGCM128_MASTER_KEY_LENGTH, SRTP_AESGCM128_MASTER_SALT_LENGTH, SRTP_AESGCM128_MASTER_LENGTH))
+                },
+                SRTP_AEAD_AES_256_GCM => {
+                    unsafe {
+                        ffi::srtp_crypto_policy_set_aes_gcm_256_16_auth(&mut local_policy.rtp);
+                        ffi::srtp_crypto_policy_set_aes_gcm_256_16_auth(&mut local_policy.rtcp);
+
+                        ffi::srtp_crypto_policy_set_aes_gcm_256_16_auth(&mut remote_policy.rtp);
+                        ffi::srtp_crypto_policy_set_aes_gcm_256_16_auth(&mut remote_policy.rtcp);
+                    }
+
+                    Ok((SRTP_AESGCM256_MASTER_KEY_LENGTH, SRTP_AESGCM256_MASTER_SALT_LENGTH, SRTP_AESGCM256_MASTER_LENGTH))
                 },
                 _ => Err(OpenSSLImportError::SrtpProfileNotSupported)
             }
