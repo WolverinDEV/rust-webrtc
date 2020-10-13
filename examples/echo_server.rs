@@ -31,6 +31,7 @@ use std::cell::Cell;
 use crate::shared::gio::MAIN_GIO_EVENT_LOOP;
 use crate::shared::ws::{WebCommand, Client, ClientEvents};
 use web_test::utils::rtcp::RtcpPacket;
+use web_test::utils::rtcp::packets::{RtcpPayloadFeedback, RtcpPacketPayloadFeedback};
 
 mod shared;
 
@@ -140,7 +141,7 @@ fn poll_video_channel(channel: &mut MediaChannelVideo, cx: &mut Context) {
                         .add_csrc(packet.ssrc())
                         .build();
 
-                    if rand::random::<u8>() < 50 && false {
+                    if rand::random::<u8>() < 5 {
                         println!("Dropping video frame");
                     } else {
                         if let Ok(buffer) = buffer {
@@ -157,9 +158,26 @@ fn poll_video_channel(channel: &mut MediaChannelVideo, cx: &mut Context) {
                         println!("RTCP RR: {:?}", report);
                         let mut report = report.clone();
                         report.ssrc = channel.local_sources().first().unwrap().id();
-                        //channel.send_control_data(RtcpPacket::ReceiverReport(report));
+                        channel.send_control_data(&RtcpPacket::ReceiverReport(report));
+                    },
+                    RtcpPacket::PayloadFeedback(feedback) => {
+                        println!("RTCP PayloadFeedback: {:?}", feedback);
+                        /* swap the feedback channels, so we're requesting the feedback from our peer */
+                        let mut feedback = feedback.clone();
+                        std::mem::swap(&mut feedback.media_ssrc, &mut feedback.ssrc);
+                        channel.send_control_data(&RtcpPacket::PayloadFeedback(feedback));
+                    },
+                    RtcpPacket::TransportFeedback(feedback) => {
+                        println!("RTCP TransportFeedback: {:?}", feedback);
+                        /* We've lost a packet. Since we can't re-request that packet, we've already received it, we're requesting a new keyframe */
+                        channel.send_control_data(&RtcpPacket::PayloadFeedback(RtcpPacketPayloadFeedback{
+                            feedback: RtcpPayloadFeedback::PictureLossIndication,
+                            ssrc: feedback.media_ssrc,
+                            media_ssrc: feedback.ssrc
+                        }));
                     },
                     _ => {
+                        channel.send_control_data(packet);
                         println!("Any RTCP packet: {:?}", packet);
                     }
                 }
