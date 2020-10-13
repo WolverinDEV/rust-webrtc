@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-pub use libsrtp2_sys as ffi;
+use libsrtp2_sys as ffi;
 use core::{ptr, mem};
 use std::os::raw::{c_void, c_int};
 use openssl::srtp::SrtpProfileId;
@@ -21,6 +21,7 @@ const SRTP_AESGCM256_MASTER_KEY_LENGTH: usize = 32;
 const SRTP_AESGCM256_MASTER_SALT_LENGTH: usize = 12;
 const SRTP_AESGCM256_MASTER_LENGTH: usize = (SRTP_AESGCM256_MASTER_KEY_LENGTH + SRTP_AESGCM256_MASTER_SALT_LENGTH);
 
+/// A wrapper around the Srtp2 error codes
 #[derive(Debug, Copy, Clone, PartialOrd, PartialEq)]
 pub enum Srtp2ErrorCode {
     Ok,
@@ -88,6 +89,7 @@ impl Srtp2ErrorCode {
         }
     }
 
+    /// Returns `true` is the error is `Srtp2ErrorCode::Ok`
     pub fn success(&self) -> Result<(), Self> {
         if self == &Srtp2ErrorCode::Ok {
             Ok(())
@@ -97,6 +99,7 @@ impl Srtp2ErrorCode {
     }
 }
 
+/// The reason why creating a Srtp2 wrapper failed to be created from an openssl ssl context.
 #[derive(Debug)]
 pub enum OpenSSLImportError {
     SrtpError(Srtp2ErrorCode),
@@ -105,11 +108,14 @@ pub enum OpenSSLImportError {
     KeyMaterialExportFailed(ErrorStack)
 }
 
+/// A wrapper around two srtp instances, used for en/decoding rt(c)p packets.
 pub struct Srtp2 {
     state_in: ffi::srtp_t,
     state_out: ffi::srtp_t,
 }
 
+/// Globally initialize Srtp.
+/// This function *must* be called before any calls to the srtp library happen
 pub fn srtp2_global_init() -> Result<(), Srtp2ErrorCode> {
     Srtp2ErrorCode::from(unsafe {
         ffi::srtp_init()
@@ -117,6 +123,7 @@ pub fn srtp2_global_init() -> Result<(), Srtp2ErrorCode> {
 }
 
 impl Srtp2 {
+    /// Create a new Srtp2 wrapper using the incoming and outgoing srtp policies.
     pub fn new(incoming_policy: &ffi::srtp_policy_t, outgoing_policy: &ffi::srtp_policy_t) -> Result<Self, Srtp2ErrorCode> {
         let mut state_in = unsafe { mem::zeroed::<ffi::srtp_t>() };
         let mut state_out = unsafe { mem::zeroed::<ffi::srtp_t>() };
@@ -127,18 +134,6 @@ impl Srtp2 {
             state_in,
             state_out
         })
-    }
-
-    pub fn set_incoming_policy(&mut self, policy: &ffi::srtp_policy_t) -> Result<(), Srtp2ErrorCode> {
-        Srtp2ErrorCode::from(unsafe {
-            ffi::srtp_update(self.state_in, policy)
-        }).success()
-    }
-
-    pub fn set_outgoing_policy(&mut self, policy: &ffi::srtp_policy_t) -> Result<(), Srtp2ErrorCode> {
-        Srtp2ErrorCode::from(unsafe {
-            ffi::srtp_update(self.state_out, policy)
-        }).success()
     }
 
     /// Unprotect a rtp packet.
@@ -199,6 +194,12 @@ impl Srtp2 {
 }
 
 impl Srtp2 {
+    /// Create a Srtp2 wrapper based on the negotiated key from the Ssl handshake.
+    /// `tlsext_use_srtp` has to be enabled, supporting
+    /// - SRTP_AES128_CM_SHA1_80
+    /// - SRTP_AES128_CM_SHA1_32
+    /// Any other modes are not supported and will result in an
+    /// `OpenSSLImportError::SrtpProfileNotSupported` error.
     pub fn from_openssl(context: &openssl::ssl::SslRef) -> Result<Self, OpenSSLImportError> {
         let profile = context.selected_srtp_profile();
         if profile.is_none() {

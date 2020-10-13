@@ -30,6 +30,7 @@ use tokio_tungstenite::tungstenite::protocol::Role::Server;
 use std::cell::Cell;
 use crate::shared::gio::MAIN_GIO_EVENT_LOOP;
 use crate::shared::ws::{WebCommand, Client, ClientEvents};
+use web_test::utils::rtcp::RtcpPacket;
 
 mod shared;
 
@@ -150,6 +151,19 @@ fn poll_video_channel(channel: &mut MediaChannelVideo, cx: &mut Context) {
                     }
                 }
             },
+            MediaChannelVideoEvents::RtcpPacketReceived(packet) => {
+                match packet {
+                    RtcpPacket::ReceiverReport(report) => {
+                        println!("RTCP RR: {:?}", report);
+                        let mut report = report.clone();
+                        report.ssrc = channel.local_sources().first().unwrap().id();
+                        channel.send_control_data(RtcpPacket::ReceiverReport(report));
+                    },
+                    _ => {
+                        println!("Any RTCP packet: {:?}", packet);
+                    }
+                }
+            }
             _ => {
                 println!("Video channel event: {:?}", event.unwrap());
             }

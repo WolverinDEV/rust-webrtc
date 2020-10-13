@@ -121,8 +121,12 @@ impl MediaChannelRtpBased {
         self.ice_control.send(PeerICEConnectionControl::SendRtpMessage(packet));
     }
 
-    pub fn send_control_data(&mut self, _packet: RtcpPacket) {
-        /* TODO! */
+    pub fn send_control_data(&mut self, packet: RtcpPacket) {
+        let mut buffer = [0u8; 2048];
+        let length = packet.write(&mut buffer)
+            .expect("failed to create rtcp packet");
+
+        self.ice_control.send(PeerICEConnectionControl::SendRtcpMessage(buffer[0..length].to_vec()));
     }
 }
 
@@ -218,26 +222,15 @@ impl MediaChannelRtpBased {
                 if let Some(_) = self.remote_sources.iter().find(|e| e.id == packet.parser.ssrc()) {
                     if let MediaChannelIncomingEvent::RtpPacketReceived(packet) = event.take().unwrap() {
                         self.event_sender.send(MediaChannelRtpBasedEvents::DataReceived(packet));
-                        /*
-                        /* TODO */
-                        if let Some(channel) = self.local_sources.first() {
-                            let mut buffer = packet.create_builder()
-                                .ssrc(channel.id)
-                                .add_csrc(packet.ssrc())
-                                .sequence(packet.sequence_number() + 100)
-                                .timestamp(packet.timestamp().wrapping_add(100000));
-
-                            let buffer = buffer.build().unwrap();
-                            self.ice_control.send(PeerICEConnectionControl::SendRtpMessage(buffer));
-                        }
-                        */
                     }
                 } else {
                     /* the packet is not from interest for use ;) */
                 }
             },
             MediaChannelIncomingEvent::RtcpPacketReceived(packet) => {
-                println!("RTCP Packet: {:?}", packet);
+                self.event_sender.send(MediaChannelRtpBasedEvents::RtcpPacketReceived(packet.clone()));
+                //println!("RTCP Packet: {:?}", packet);
+                /*
                 match packet.clone() {
                     RtcpPacket::SenderReport(mut sr) => {
                         if let Some(channel) = self.local_sources.first() {
@@ -254,6 +247,7 @@ impl MediaChannelRtpBased {
                     }
                     _ => {}
                 }
+                */
             },
             _ => {}
         }

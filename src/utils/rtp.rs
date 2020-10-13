@@ -15,7 +15,8 @@ pub fn is_rtp_header(buffer: &[u8]) -> bool {
     }
 }
 
-
+/// A wrapper around a rtp packet, owning the packet buffer and holding an instance of
+/// `rtp_rs::RtpReader` which has parsed this packet.
 pub struct ParsedRtpPacket {
     /* Attention: Mutating the buffer content does change the package validity; So DON'T do it! */
     buffer: Pin<Vec<u8>>,
@@ -23,6 +24,8 @@ pub struct ParsedRtpPacket {
 }
 
 impl ParsedRtpPacket {
+    /// Parse and create a new `ParsedRtpPacket`.
+    /// If it fails to parse the packet, the original packet along with the error will be returned.
     pub fn new(buffer: Vec<u8>) -> Result<Self, (RtpReaderError, Vec<u8>)> {
         let slice = unsafe {
             std::slice::from_raw_parts(buffer.as_ptr(), buffer.len())
@@ -39,6 +42,7 @@ impl ParsedRtpPacket {
         })
     }
 
+    /// Get the underlying buffer for the packet
     pub fn into_raw_buffer(self) -> Vec<u8> {
         Pin::<Vec<u8>>::into_inner(self.buffer)
     }

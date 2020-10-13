@@ -49,6 +49,7 @@ impl DataChannelType {
         }
     }
 
+    /// Returns whatever the channel type is ordered
     pub fn is_ordered(&self) -> bool {
         match self {
             DataChannelType::Reliable                          => true,
@@ -60,6 +61,7 @@ impl DataChannelType {
         }
     }
 
+    /// Returns the value for the reliability parameter.
     pub fn reliability_parameter(&self) -> u32 {
         match self {
             DataChannelType::Reliable                          => 0,
@@ -85,15 +87,27 @@ impl DataChannelType {
     }
 }
 
+/// Parsed DataChannel open control message as described in
+/// https://tools.ietf.org/html/draft-ietf-rtcweb-data-protocol-08#section-5.1
 #[derive(PartialEq, Debug)]
 pub struct DataChannelControlMessageOpen {
+    /// This field specifies the type of the Data Channel to be opened
+    /// and contains, if required the reliability parameter
     pub channel_type: DataChannelType,
+    /// The priority of the Data Channel
     pub priority: u16,
+    /// The name of the Data Channel as a UTF-8 encoded string.
+    /// This may be an empty string.
     pub label: String,
+    /// If this is an empty string the protocol is unspecified.
+    /// If it is a non-empty string, it specifies a protocol registered in the
+    /// 'WebSocket Subprotocol Name Registry' created in [RFC6455](https://tools.ietf.org/html/rfc6455).
+    /// This string is UTF-8 encoded.
     pub protocol: String
 }
 
 impl DataChannelControlMessageOpen {
+    /// Parsing the buffer as a `DataChannelControlMessageOpen`
     pub fn parse(buffer: &[u8]) -> Result<DataChannelControlMessageOpen> {
         let mut reader = Cursor::new(buffer);
         if reader.read_u8()? != DataChannelControlMessageType::Open.value() {
@@ -126,10 +140,12 @@ impl DataChannelControlMessageOpen {
         })
     }
 
+    /// Returns the expected length in bytes
     pub fn expected_length(&self) -> usize {
         12 + self.label.len() + self.protocol.len()
     }
 
+    /// Create/Write the data channel open packet to the target buffer
     pub fn write(&self, target: &mut [u8]) -> Result<usize> {
         let mut writer = Cursor::new(target);
         writer.write_u8(DataChannelControlMessageType::Open.value())?;
@@ -144,10 +160,13 @@ impl DataChannelControlMessageOpen {
     }
 }
 
+/// Parsed DataChannel open ack control message as described in
+/// https://tools.ietf.org/html/draft-ietf-rtcweb-data-protocol-08#section-5.2
 #[derive(PartialEq, Debug)]
 pub struct DataChannelControlMessageOpenAck { }
 
 impl DataChannelControlMessageOpenAck {
+    /// Parsing the buffer as a `DataChannelControlMessageOpen`
     pub fn parse(buffer: &[u8]) -> Result<DataChannelControlMessageOpenAck> {
         let mut rdr = Cursor::new(buffer);
         if rdr.read_u8()? != DataChannelControlMessageType::OpenAck.value() {
@@ -157,10 +176,12 @@ impl DataChannelControlMessageOpenAck {
         Ok(DataChannelControlMessageOpenAck{})
     }
 
+    /// Returns the expected length in bytes
     pub fn expected_length(&self) -> usize {
         1
     }
 
+    /// Create/Write the data channel open ack packet to the target buffer
     pub fn write(&self, target: &mut [u8]) -> Result<usize> {
         let mut writer = Cursor::new(target);
         writer.write_u8(DataChannelControlMessageType::OpenAck.value())?;
@@ -168,6 +189,7 @@ impl DataChannelControlMessageOpenAck {
     }
 }
 
+/// This enum contains all registered DataChannel control message types as listed in
 /// https://tools.ietf.org/html/draft-ietf-rtcweb-data-protocol-08#section-8.2.1
 #[derive(PartialOrd, PartialEq, Debug, Copy, Clone, Eq)]
 pub enum DataChannelControlMessageType {
@@ -176,6 +198,7 @@ pub enum DataChannelControlMessageType {
 }
 
 impl DataChannelControlMessageType {
+    /// Return the type as u8
     pub fn value(&self) -> u8 {
         match self {
             DataChannelControlMessageType::Open    => 0x03,
@@ -183,6 +206,9 @@ impl DataChannelControlMessageType {
         }
     }
 
+    /// Parse the type from an u8.
+    /// If the type does not match any known message type,
+    /// `None` will be returned.
     fn from(value: u8) -> Option<Self> {
         match value {
             0x03 => Some(DataChannelControlMessageType::Open),
@@ -192,6 +218,7 @@ impl DataChannelControlMessageType {
     }
 }
 
+/// Container for all parsed DataChannel control messages
 #[derive(PartialEq, Debug)]
 pub enum DataChannelControlMessage {
     Open(DataChannelControlMessageOpen),
@@ -199,6 +226,7 @@ pub enum DataChannelControlMessage {
 }
 
 impl DataChannelControlMessage {
+    /// Parse the buffer as a DataChannel control message
     pub fn parse(buffer: &[u8]) -> Result<DataChannelControlMessage> {
         if buffer.len() < 1 { return Err(Error::new(ErrorKind::UnexpectedEof, "missing control message type")); }
 
@@ -211,6 +239,7 @@ impl DataChannelControlMessage {
         }
     }
 
+    /// Calculate the expected message length in bytes
     pub fn expected_length(&self) -> usize {
         let payload_length = match self {
             DataChannelControlMessage::Open(payload) => payload.expected_length(),
@@ -219,6 +248,8 @@ impl DataChannelControlMessage {
         payload_length
     }
 
+    /// Write the control message to the target buffer.
+    /// On success it returns the written bytes.
     pub fn write(&self, target: &mut [u8]) -> Result<usize> {
         match self {
             DataChannelControlMessage::Open(payload) => payload.write(target),
@@ -227,7 +258,8 @@ impl DataChannelControlMessage {
     }
 }
 
-/// https://tools.ietf.org/html/draft-ietf-rtcweb-data-channel-13 Section 8
+/// This enum contains all registered DataChannel message types as listed in
+/// https://tools.ietf.org/html/draft-ietf-rtcweb-data-channel-13#section-8
 pub enum DataChannelMessageType {
     Control,
     String,
@@ -237,6 +269,7 @@ pub enum DataChannelMessageType {
 }
 
 impl DataChannelMessageType {
+    /// Get the SCTP PPID (Packet Payload Identifier) value
     pub fn value(&self) -> u32 {
         match self {
             &DataChannelMessageType::Control     => 50,
@@ -247,6 +280,7 @@ impl DataChannelMessageType {
         }
     }
 
+    /// Parse the DataChannelMessageType from a given SCTP PPID (Packet Payload Identifier)
     fn from(value: u32) -> Option<Self> {
         match value {
             50 => Some(DataChannelMessageType::Control),
@@ -259,6 +293,7 @@ impl DataChannelMessageType {
     }
 }
 
+/// Container for all known DataChannel messages
 #[derive(PartialEq, Debug)]
 pub enum DataChannelMessage {
     Control(DataChannelControlMessage),
@@ -269,19 +304,22 @@ pub enum DataChannelMessage {
 }
 
 impl DataChannelMessage {
-    pub fn parse(buffer: &[u8], ppid: u32) -> Result<DataChannelMessage> {
+    /// Parse a DataChannelMessage from the given buffer.
+    /// The PPID is required to properly parse the payload.
+    pub fn parse(payload: &[u8], ppid: u32) -> Result<DataChannelMessage> {
         let msg_type = DataChannelMessageType::from(ppid)
             .ok_or(Error::new(ErrorKind::InvalidInput, "invalid data channel message type"))?;
 
         match msg_type {
-            DataChannelMessageType::Control => Ok(DataChannelMessage::Control(DataChannelControlMessage::parse(buffer)?)),
-            DataChannelMessageType::String => Ok(DataChannelMessage::String(String::from_utf8(Vec::from(buffer)).map_err(|err| Error::new(ErrorKind::InvalidInput, err))?)),
+            DataChannelMessageType::Control => Ok(DataChannelMessage::Control(DataChannelControlMessage::parse(payload)?)),
+            DataChannelMessageType::String => Ok(DataChannelMessage::String(String::from_utf8(Vec::from(payload)).map_err(|err| Error::new(ErrorKind::InvalidInput, err))?)),
             DataChannelMessageType::StringEmpty => Ok(DataChannelMessage::StringEmpty()),
-            DataChannelMessageType::Binary => Ok(DataChannelMessage::Binary(Vec::from(buffer))),
+            DataChannelMessageType::Binary => Ok(DataChannelMessage::Binary(Vec::from(payload))),
             DataChannelMessageType::BinaryEmpty => Ok(DataChannelMessage::BinaryEmpty())
         }
     }
 
+    /// Get the `DataChannelMessageType` from this message.
     pub fn message_type(&self) -> DataChannelMessageType {
         match self {
             DataChannelMessage::Control(_) => DataChannelMessageType::Control,
@@ -292,6 +330,7 @@ impl DataChannelMessage {
         }
     }
 
+    /// Calculate the expected packet length in bytes
     pub fn expected_length(&self) -> usize {
         let payload_length = match self {
             DataChannelMessage::Control(message) => message.expected_length(),
@@ -304,6 +343,8 @@ impl DataChannelMessage {
         payload_length
     }
 
+    /// Write the DataChannel message to the target buffer.
+    /// On success the written byte count will be returned.
     pub fn write(&self, mut buffer: &mut [u8]) -> Result<usize> {
         match self {
             DataChannelMessage::Control(message) => message.write(&mut buffer),

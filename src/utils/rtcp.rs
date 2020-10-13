@@ -23,7 +23,8 @@ fn read_profile_data(reader: &mut Cursor<&[u8]>, profile_data_length_with_paddin
     } else {
         let mut buffer = Vec::new();
         if reader.read_to_end(&mut buffer)? != profile_data_length_with_padding {
-            return Err(Error::new(ErrorKind::InvalidInput, "given packet length was too long"));
+            /* TODO: For some reason the video RR packets do not fit this contraint if a frame got lost */
+            //return Err(Error::new(ErrorKind::InvalidInput, "given packet length was too long"));
         }
 
         if padded {
@@ -478,6 +479,15 @@ impl RtcpPacket {
                 Ok(RtcpPacket::Unknown(Vec::from(buffer)))
             }
         }
+    }
+
+    pub fn write(&self, buffer: &mut [u8]) -> Result<usize> {
+        let mut writer = Cursor::new(buffer);
+        match self {
+            RtcpPacket::ReceiverReport(report) => report.write(&mut writer),
+            _ => Err(Error::new(ErrorKind::Other, "write not supported"))
+        }?;
+        Ok(writer.position() as usize)
     }
 
     /* TODO: Write */

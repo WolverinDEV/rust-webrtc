@@ -419,7 +419,7 @@ impl PeerConnection {
                         self.dispatch_media_event(ice, MediaChannelIncomingEvent::RtcpPacketReceived(packet));
                     },
                     Err(error) => {
-                        eprintln!("Failed to decode RTP packet: {:?}", error);
+                        eprintln!("Failed to decode RTCP packet: {:?}", error);
                     }
                 }
                 None
