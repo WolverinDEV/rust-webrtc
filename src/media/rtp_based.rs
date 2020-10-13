@@ -121,7 +121,7 @@ impl MediaChannelRtpBased {
         self.ice_control.send(PeerICEConnectionControl::SendRtpMessage(packet));
     }
 
-    pub fn send_control_data(&mut self, packet: RtcpPacket) {
+    pub fn send_control_data(&mut self, packet: &RtcpPacket) {
         let mut buffer = [0u8; 2048];
         let length = packet.write(&mut buffer)
             .expect("failed to create rtcp packet");

@@ -424,6 +424,18 @@ impl PeerConnection {
                 for index in 0..packet_count.unwrap() {
                     match RtcpPacket::parse(packets[index]) {
                         Ok(packet) => {
+                            let mut buffer = [0u8; 2038];
+                            match packet.write(&mut buffer) {
+                                Err(error) => {
+                                    eprintln!("Failed to write received RTCP packet: {:?}", error);
+                                },
+                                Ok(length) => {
+                                    if packets[index] != &buffer[0..length] {
+                                        eprintln!("Parsed packet: {:?}", packet);
+                                        eprintln!("Created packet is different than source packet:\nSource:  {:?}\nCreated: {:?}", &packets[index], &buffer[0..length]);
+                                    }
+                                }
+                            }
                             self.dispatch_media_event(ice, MediaChannelIncomingEvent::RtcpPacketReceived(packet));
                         },
                         Err(error) => {
