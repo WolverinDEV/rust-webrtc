@@ -8,11 +8,11 @@ edition = "2018"
 
 [dependencies]
 # libnice = { git = "https://github.com/WolverinDEV/rust-libnice" }
-libnice = { path = "D:\\git\\rust\\rust-libnice" }
-libusrsctp-sys = { path = "D:\\git\\rust\\rust-usrsctp-sys" }
-libsrtp2-sys = { path = "D:\\git\\rust\\rust-srtp2-sys" }
+libnice = { path = "..\\rust-libnice" }
+libusrsctp-sys = { path = "..\\rust-usrsctp-sys" }
+libsrtp2-sys = { path = "..\\rust-srtp2-sys" }
 #rtp-rs = { git = "https://github.com/WolverinDEV/rtp-rs.git" }
-rtp-rs = { path = "D:\\git\\rust\\rtp-rs" }
+rtp-rs = { path = "..\\rtp-rs" }
 tokio-tungstenite = "0.11.0"
 tokio = { version = "0.2", features = ["full"] }
 futures = "0.3.5"

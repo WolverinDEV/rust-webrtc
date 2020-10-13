@@ -3,7 +3,7 @@
 use glib::{MainContext, BoolError};
 use webrtc_sdp::media_type::{SdpMediaValue};
 use std::sync::{Arc, Mutex};
-use webrtc_sdp::attribute_type::{SdpAttributeType, SdpAttribute, SdpAttributeSetup, SdpAttributeMsidSemantic};
+use webrtc_sdp::attribute_type::{SdpAttributeType, SdpAttribute, SdpAttributeSetup, SdpAttributeMsidSemantic, SdpAttributeGroup, SdpAttributeGroupSemantic};
 use std::fmt::Debug;
 use futures::{FutureExt, StreamExt};
 use libnice::ice::{Candidate};
@@ -21,6 +21,10 @@ use libnice::ffi::{NiceCompatibility, NiceAgentProperty};
 use libnice::sys::NiceAgentOption_NICE_AGENT_OPTION_ICE_TRICKLE;
 use crate::media::application::MediaChannelApplication;
 use crate::media::audio::MediaChannelAudio;
+use crate::media::video::MediaChannelVideo;
+use crate::media::MediaChannelIncomingEvent;
+use crate::utils::rtp::ParsedRtpPacket;
+use crate::utils::rtcp::RtcpPacket;
 
 /// The default setup type if the remote peer offers active and passive setup
 /// Allowed values are only `SdpAttributeSetup::Passive` and `SdpAttributeSetup::Active`
@@ -262,9 +266,9 @@ impl PeerConnection {
                 SdpMediaValue::Audio => {
                     Ok(Arc::new(Mutex::new(MediaChannelAudio::new(media_id.clone(), ice_channel_mut.control_sender.clone()))) as Arc<Mutex<dyn media::MediaChannel>>)
                 },
-                _ => {
-                    Err(RemoteDescriptionApplyError::UnsupportedMediaType { media_index })
-                }
+                SdpMediaValue::Video => {
+                    Ok(Arc::new(Mutex::new(MediaChannelVideo::new(media_id.clone(), ice_channel_mut.control_sender.clone()))) as Arc<Mutex<dyn media::MediaChannel>>)
+                },
             }?;
 
             channel.lock().unwrap().configure(media)
@@ -284,7 +288,13 @@ impl PeerConnection {
             username: self.origin_username.clone()
         }, String::from("-")); /* "-" indicates no session id */
         answer.timing = Some(SdpTiming{ start: 0, stop: 0 }); /* required by WebRTC */
-        answer.add_attribute(SdpAttribute::MsidSemantic(SdpAttributeMsidSemantic{ semantic: String::from("WMS"), msids: vec![String::from("janus")] })).unwrap();
+
+        /* Bundle out media streams */
+        answer.add_attribute(SdpAttribute::Group(SdpAttributeGroup{
+            semantics: SdpAttributeGroupSemantic::Bundle,
+            tags: self.media_channel.keys().into_iter().map(|e| e.1.clone()).collect()
+        }));
+
         let mut keys = self.media_channel.keys().map(|e| e.clone()).collect::<Vec<MediaId>>();
         keys.sort_by_key(|e| e.0);
 
@@ -331,9 +341,12 @@ impl PeerConnection {
 
     pub fn finish_remote_ice_candidates(&mut self) {
         /* FIXME: Expose the media streams and let the client call add_remove_ice_candidate */
-        self.ice_channels.iter_mut().for_each(|channel| RefCell::borrow_mut(channel).add_remote_candidate(None).map_err(|_error| {
-            ()
-        }).unwrap());
+        self.ice_channels.iter_mut().for_each(|channel| {
+            let _ = RefCell::borrow_mut(channel).add_remote_candidate(None).map_err(|error| {
+                eprintln!("Failed to add ice candidate finished: {:?}", error);
+                ()
+            });
+        });
     }
 
     pub fn media_channels_mut(&mut self) -> Vec<Arc<Mutex<dyn media::MediaChannel>>> {
@@ -369,6 +382,21 @@ impl PeerConnection {
         self.ice_channels.iter().find(|channel| RefCell::borrow(channel).media_ids.iter().find(|media| media_fragment.matches(media)).is_some())
     }
 
+    fn dispatch_media_event(&self, ice: &mut RefMut<PeerICEConnection>, event: MediaChannelIncomingEvent) {
+        let mut event = Some(event);
+        for stream_id in ice.media_ids.iter() {
+            let channel = self.media_channel.get(stream_id)
+                .expect("missing media channel, but it's registered on an ice connection");
+
+            let mut channel = channel.lock().unwrap();
+            channel.process_peer_event(&mut event);
+            if event.is_none() {
+                /* event has been consumed */
+                break;
+            }
+        }
+    }
+
     fn handle_ice_event(&mut self, ice: &mut RefMut<PeerICEConnection>, event: PeerICEConnectionEvent) -> Option<PeerConnectionEvent> {
         match event {
             PeerICEConnectionEvent::LocalIceCandidate(candidate) => {
@@ -377,14 +405,37 @@ impl PeerConnection {
             PeerICEConnectionEvent::LocalIceGatheringFinished() => {
                 return Some(PeerConnectionEvent::LocalIceCandidate(None, ice.owning_media_id.clone()));
             },
+            PeerICEConnectionEvent::DtlsInitialized() => {
+                self.dispatch_media_event(ice, MediaChannelIncomingEvent::TransportInitialized);
+                None
+            },
+            PeerICEConnectionEvent::MessageReceivedDtls(message) => {
+                self.dispatch_media_event(ice, MediaChannelIncomingEvent::DtlsDataReceived(message));
+                None
+            },
+            PeerICEConnectionEvent::MessageReceivedRtcp(message) => {
+                match RtcpPacket::parse(&message) {
+                    Ok(packet) => {
+                        self.dispatch_media_event(ice, MediaChannelIncomingEvent::RtcpPacketReceived(packet));
+                    },
+                    Err(error) => {
+                        eprintln!("Failed to decode RTP packet: {:?}", error);
+                    }
+                }
+                None
+            },
+            PeerICEConnectionEvent::MessageReceivedRtp(message) => {
+                match ParsedRtpPacket::new(message) {
+                    Ok(reader) => {
+                        self.dispatch_media_event(ice, MediaChannelIncomingEvent::RtpPacketReceived(reader));
+                    },
+                    Err((error, _)) => {
+                        eprintln!("Failed to decode RTP packet: {:?}", error);
+                    }
+                }
+                None
+            },
             _ => {
-                ice.media_ids.iter().for_each(|media| {
-                    let channel = self.media_channel.get_mut(media)
-                        .expect("missing media channel, but it's registered on an ice connection");
-
-                    let mut channel = channel.lock().unwrap();
-                    channel.process_peer_event(&event);
-                });
                 None
             }
         }

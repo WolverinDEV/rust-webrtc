@@ -7,19 +7,21 @@ use crate::media::{MediaChannel, TypedMediaChannel, MediaChannelIncomingEvent};
 use webrtc_sdp::media_type::{SdpMedia, SdpMediaValue};
 use futures::TryStreamExt;
 
-pub struct MediaChannelAudio {
+pub use crate::media::rtp_based::MediaChannelRtpBasedEvents as MediaChannelVideoEvents;
+
+pub struct MediaChannelVideo {
     base: MediaChannelRtpBased
 }
 
-impl MediaChannelAudio {
+impl MediaChannelVideo {
     pub fn new(media_id: MediaId, ice_control: mpsc::UnboundedSender<PeerICEConnectionControl>) -> Self {
-        MediaChannelAudio {
-            base: MediaChannelRtpBased::new(SdpMediaValue::Audio, media_id, ice_control)
+        MediaChannelVideo {
+            base: MediaChannelRtpBased::new(SdpMediaValue::Video, media_id, ice_control)
         }
     }
 }
 
-impl Deref for MediaChannelAudio {
+impl Deref for MediaChannelVideo {
     type Target = MediaChannelRtpBased;
 
     fn deref(&self) -> &Self::Target {
@@ -27,15 +29,15 @@ impl Deref for MediaChannelAudio {
     }
 }
 
-impl DerefMut for MediaChannelAudio {
+impl DerefMut for MediaChannelVideo {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.base
     }
 }
 
-impl MediaChannel for MediaChannelAudio {
+impl MediaChannel for MediaChannelVideo {
     fn as_typed(&mut self) -> TypedMediaChannel {
-        TypedMediaChannel::Audio(self)
+        TypedMediaChannel::Video(self)
     }
 
     fn media_id(&self) -> &(usize, String) {

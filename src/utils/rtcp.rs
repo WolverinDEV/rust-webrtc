@@ -66,7 +66,7 @@ fn write_profile_data(writer: &mut Cursor<&mut [u8]>, data: &Option<Vec<u8>>, pa
     Ok(())
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RtcpReportBlock {
     pub fraction_lost: u8,
     pub cumulative_packets_lost: u32,
@@ -115,7 +115,7 @@ impl RtcpReportBlock {
 }
 
 /// https://tools.ietf.org/html/rfc1889#section-6.3.1
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RtcpPacketSenderReport {
     pub ssrc: u32,
     pub network_timestamp: u64,
@@ -203,7 +203,7 @@ impl RtcpPacketSenderReport {
 }
 
 ///https://tools.ietf.org/html/rfc1889#section-6.3.2
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RtcpPacketReceiverReport {
     pub ssrc: u32,
     pub reports: Vec<RtcpReportBlock>,
@@ -275,6 +275,7 @@ impl RtcpPacketReceiverReport {
     }
 }
 
+#[derive(Clone)]
 pub struct RtcpFeedbackGenericNACK {
     packet_id: u16,
     bitmask_lost_packets: u16
@@ -322,7 +323,7 @@ impl Debug for RtcpFeedbackGenericNACK {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum RtcpFeedback {
     GenericNACK(Vec<RtcpFeedbackGenericNACK>),
 }
@@ -363,7 +364,7 @@ impl RtcpFeedbackType {
 }
 
 ///https://tools.ietf.org/html/rfc4585#section-6.1
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RtcpPacketFeedback {
     ssrc: u32,
     media_ssrc: u32,
@@ -449,11 +450,13 @@ impl RtcpPacketType {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum RtcpPacket {
     SenderReport(RtcpPacketSenderReport),
     ReceiverReport(RtcpPacketReceiverReport),
-    Feedback(RtcpPacketFeedback)
+    Feedback(RtcpPacketFeedback),
+
+    Unknown(Vec<u8>)
 }
 
 impl RtcpPacket {
@@ -462,14 +465,18 @@ impl RtcpPacket {
             return Err(Error::new(ErrorKind::InvalidInput, "truncated packet"));
         }
 
-        let packet_type = RtcpPacketType::from(buffer[1])
-            .ok_or(Error::new(ErrorKind::InvalidInput, "unknown rtcp packet"))?;
-
-        let mut reader = Cursor::new(buffer);
-        match packet_type {
-            RtcpPacketType::SenderReport => Ok(RtcpPacket::SenderReport(RtcpPacketSenderReport::parse(&mut reader)?)),
-            RtcpPacketType::ReceiverReport => Ok(RtcpPacket::ReceiverReport(RtcpPacketReceiverReport::parse(&mut reader)?)),
-            RtcpPacketType::Feedback => Ok(RtcpPacket::Feedback(RtcpPacketFeedback::parse(&mut reader)?)),
+        match RtcpPacketType::from(buffer[1]) {
+            Some(packet_type) => {
+                let mut reader = Cursor::new(buffer);
+                match packet_type {
+                    RtcpPacketType::SenderReport => Ok(RtcpPacket::SenderReport(RtcpPacketSenderReport::parse(&mut reader)?)),
+                    RtcpPacketType::ReceiverReport => Ok(RtcpPacket::ReceiverReport(RtcpPacketReceiverReport::parse(&mut reader)?)),
+                    RtcpPacketType::Feedback => Ok(RtcpPacket::Feedback(RtcpPacketFeedback::parse(&mut reader)?)),
+                }
+            },
+            _ => {
+                Ok(RtcpPacket::Unknown(Vec::from(buffer)))
+            }
         }
     }
 

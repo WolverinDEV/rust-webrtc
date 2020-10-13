@@ -15,7 +15,7 @@ use futures::{StreamExt, Stream};
 use std::io::{Read, Write};
 use std::cell::RefCell;
 use std::rc::Rc;
-use crate::media::{MediaChannel, TypedMediaChannel};
+use crate::media::{MediaChannel, TypedMediaChannel, MediaChannelIncomingEvent};
 use std::ops::{DerefMut, Deref};
 use std::collections::{VecDeque, BTreeMap};
 use futures::io::ErrorKind;
@@ -503,15 +503,20 @@ impl MediaChannel for MediaChannelApplication {
         Ok(media)
     }
 
-    fn process_peer_event(&mut self, event: &PeerICEConnectionEvent) {
-        match event {
-            PeerICEConnectionEvent::MessageReceivedDtls(message) => {
+    fn process_peer_event(&mut self, event: &mut Option<MediaChannelIncomingEvent>) {
+        match event.as_ref().unwrap() {
+            MediaChannelIncomingEvent::DtlsDataReceived(..) => {
                 let mut sctp_buffer = RefCell::borrow_mut(&self.stream);
-                sctp_buffer.read_queue.push_back(message.clone());
+
+                if let MediaChannelIncomingEvent::DtlsDataReceived(message) = event.take().unwrap() {
+                    sctp_buffer.read_queue.push_back(message);
+                } else {
+                    panic!();
+                }
 
                 if let Some(waker) = &self.poll_waker { waker.wake_by_ref(); }
             },
-            PeerICEConnectionEvent::DtlsInitialized() => {
+            MediaChannelIncomingEvent::TransportInitialized => {
                 self.sctp_session.connect(self.remote_config.as_ref().expect("missing remote config").port);
 
                 let _result = self.sctp_session.change_peer_addr_params(|params| {

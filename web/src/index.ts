@@ -111,6 +111,26 @@ async function initializePeerAudio(peer: RTCPeerConnection) {
     //audioContext.createMediaStreamSource(microphoneStream).connect(audioContext.destination);
 }
 
+function showVideoStream(stream: MediaStream) {
+    let element = document.createElement("video");
+    element.width = 400;
+    element.height = 300;
+    element.style.border = "1px solid black";
+    element.style.borderRadius = "1px";
+    element.srcObject = stream;
+    element.autoplay = true;
+    document.body.append(element);
+}
+
+async function initializePeerVideo(peer: RTCPeerConnection) {
+    const camaraStream = await navigator.mediaDevices.getUserMedia({
+        video: true
+    });
+    camaraStream.getVideoTracks().forEach(track => peer.addTrack(track));
+    showVideoStream(camaraStream);
+    //audioContext.createMediaStreamSource(microphoneStream).connect(audioContext.destination);
+}
+
 async function initializePeer() {
     peer = new RTCPeerConnection({
         iceServers: [ { urls: ["stun:stun.l.google.com:19302"] } ]
@@ -138,40 +158,59 @@ async function initializePeer() {
     }
 
     peer.ontrack = event => {
-        console.error("Streams: %o", event.streams);
-        console.log("[AUD] Received remote %s track %s (%s) %s", event.track.kind, event.track.id, event.track.label, event.streams[0]?.id);
-        event.track.onmute = () => console.log("[AUD] Muted %s", event.track.id);
-        event.track.onunmute = () => console.log("[AUD] Unmute %s", event.track.id);
-        event.track.onended = () => console.log("[AUD] Ended %s", event.track.id);
-        event.track.onisolationchange = () => console.log("[AUD] Isolationchange %s", event.track.id);
+        const stream = event.streams[0];
+        if(!stream) {
+            /* tracks sadly don't have any reliably names, but streams could have */
+            console.warn("Received track without a video stream.");
+            return;
+        }
+        if(event.track.kind === "audio") {
+            console.error("Streams: %o", event.streams);
+            console.log("[AUD] Received remote %s track %s (%s) %s", event.track.kind, event.track.id, event.track.label, event.streams[0]?.id);
+            event.track.onmute = () => console.log("[AUD] Muted %s", event.track.id);
+            event.track.onunmute = () => console.log("[AUD] Unmute %s", event.track.id);
+            event.track.onended = () => console.log("[AUD] Ended %s", event.track.id);
+            event.track.onisolationchange = () => console.log("[AUD] Isolationchange %s", event.track.id);
 
-        const mstream = new MediaStream();
-        (window as any).track = event.track;
-        mstream.addTrack(event.track);
-        let stream = audioContext.createMediaStreamSource(mstream);
-        stream.connect(audioContext.destination);
+            const mstream = new MediaStream();
+            (window as any).track = event.track;
+            mstream.addTrack(event.track);
+            let stream = audioContext.createMediaStreamSource(mstream);
+            stream.connect(audioContext.destination);
 
-        audioElement = new Audio();
-        document.body.append(audioElement);
-        audioElement.srcObject = mstream;
-        audioElement.autoplay = true;
-        audioElement.muted = true;
-        (window as any).audioElement = audioElement;
+            audioElement = new Audio();
+            document.body.append(audioElement);
+            audioElement.srcObject = mstream;
+            audioElement.autoplay = true;
+            audioElement.muted = true;
+            (window as any).audioElement = audioElement;
 
-        if(event.streams[0]) {
-            let stream = audioContext.createMediaStreamSource(event.streams[0]);
-            //stream.connect(audioContext.destination);
+            if(event.streams[0]) {
+                let stream = audioContext.createMediaStreamSource(event.streams[0]);
+                //stream.connect(audioContext.destination);
+            }
+        } else if(event.track.kind === "video") {
+            console.error("Received video track");
+            showVideoStream(stream);
         }
     };
 
-    await initializePeerApplication(peer);
+    //await initializePeerApplication(peer);
 
-    const kEnableAudio = true;
+    const kEnableAudio = false;
     if(kEnableAudio) {
         await initializePeerAudio(peer);
     }
 
-    const offer = await peer.createOffer({ offerToReceiveAudio: kEnableAudio, /* offerToReceiveVideo: true, voiceActivityDetection: true */ });
+    const kEnableVideo = true;
+    if(kEnableVideo) {
+        await initializePeerVideo(peer);
+    }
+
+    const offer = await peer.createOffer({
+        offerToReceiveAudio: kEnableAudio,
+        offerToReceiveVideo: kEnableVideo
+    });
     await peer.setLocalDescription(offer);
 
     console.log("[SDP] Offer:\n%s", offer.sdp);

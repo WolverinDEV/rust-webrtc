@@ -118,7 +118,7 @@ enum DTLSState {
 pub struct PeerICEConnection {
     /// Index of the "owning" media line
     pub owning_media_id: MediaId,
-    /// Containing all media lines which actively listening to the channel events
+    /// Containing all media lines which actively listening to the channel events (bundled channels)
     pub media_ids: Vec<MediaId>,
 
     pub local_credentials: ICECredentials,
@@ -225,7 +225,11 @@ impl PeerICEConnection {
         Ok((private_key, certificate, fingerprint, ssl))
     }
 
-    pub fn new(mut stream: libnice::ice::Stream, remote_credentials: ICECredentials, media_id: MediaId, setup: SdpAttributeSetup) -> Result<PeerICEConnection, ICEConnectionInitializeError> {
+    pub fn new(mut stream: libnice::ice::Stream,
+               remote_credentials: ICECredentials,
+               media_id: MediaId,
+               setup: SdpAttributeSetup
+    ) -> Result<PeerICEConnection, ICEConnectionInitializeError> {
         assert_eq!(stream.components().len(), 1, "expected only one stream component");
 
 
@@ -233,7 +237,7 @@ impl PeerICEConnection {
         stream.set_remote_credentials(CString::new(remote_credentials.username.clone()).unwrap(), CString::new(remote_credentials.password.clone()).unwrap());
 
         let dtls_stream = DtlsStreamSource{
-            verbose: true ,
+            verbose: false ,
             read_buffer_offset: 0,
             read_buffer: VecDeque::with_capacity(32),
             writer: stream.mut_components()[0].writer()
@@ -473,7 +477,7 @@ impl Stream for PeerICEConnection {
                     Ok(read) => {
                         if read == 0 {
                             /* TODO: Shutdown handling */
-                            std::mem::replace(&mut self.dtls, Some(DTLSState::Failed()));
+                            let _ = std::mem::replace(&mut self.dtls, Some(DTLSState::Failed()));
                             println!("DTLS read returned EOF");
                         }
                         return Poll::Ready(Some(PeerICEConnectionEvent::MessageReceivedDtls(buffer[..read].to_vec())));
