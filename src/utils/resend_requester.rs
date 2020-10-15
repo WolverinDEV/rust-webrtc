@@ -77,12 +77,27 @@ impl RtpPacketResendRequester {
         }
     }
 
+    pub fn reset(&mut self) {
+        self.resend_delay = None;
+        self.last_packet_id = PacketId::new(0);
+        self.last_packet_timestamp = 0xFFFFFFFF;
+
+        self.flush_pending_packets(false);
+        self.receive_timestamp_index = 0;
+        self.receive_index = self.last_packet_id;
+    }
+
+    pub fn reset_resends(&mut self) {
+        self.resend_delay = None;
+        self.flush_pending_packets(false);
+    }
+
     pub fn handle_packet_received(&mut self, id: PacketId) -> PacketReceivedResult {
         let current_timestamp = self.current_timestamp();
         if current_timestamp.wrapping_sub(self.last_packet_timestamp) > 1000 {
             /* We've not received packets for a quite long time. Marking the old sequence as finished and beginning a new one. */
             let had_sequence = self.receive_timestamps.iter().find(|e| **e != 1).is_some();
-            self.flush_pending_packets();
+            self.flush_pending_packets(true);
             self.receive_index = id + 1 - self.receive_timestamps.len() as u16;
             self.receive_timestamp_index = 0;
             if had_sequence {
@@ -96,7 +111,7 @@ impl RtpPacketResendRequester {
         if distance >= self.receive_timestamps.len() * 2 {
             /* Assuming we're having a new sequence, or lost more than self.receive_timestamps.len() packets. */
             let had_sequence = self.receive_timestamps.iter().find(|e| **e != 1).is_some();
-            self.flush_pending_packets();
+            self.flush_pending_packets(true);
             self.receive_index = id + 1 - self.receive_timestamps.len() as u16;
             self.receive_timestamp_index = 0;
             distance = self.receive_timestamps.len() - 1;
@@ -163,7 +178,7 @@ impl RtpPacketResendRequester {
 
     /// Assume all, not yet received packets as lost.
     /// Call this if
-    fn flush_pending_packets(&mut self) {
+    fn flush_pending_packets(&mut self, emit_lost: bool) {
         let mut index = self.receive_timestamp_index;
         let mut packet_index = self.receive_index;
 
@@ -182,7 +197,7 @@ impl RtpPacketResendRequester {
             packet_index = packet_index + 1;
         }
 
-        if lost_packets_count > 0 {
+        if emit_lost && lost_packets_count > 0 {
             let _ = self.events.0.send(RtpPacketResendRequesterEvent::PacketTimedOut(lost_packets[0..lost_packets_count].to_vec()));
         }
     }
@@ -207,7 +222,7 @@ impl RtpPacketResendRequester {
             }
 
             index = (index + 1) % self.receive_timestamps.len();
-            if (index + self.threshold_start_resend) % self.receive_timestamps.len() == self.receive_timestamp_index { break; }
+            if (index + self.threshold_start_resend as usize) % self.receive_timestamps.len() == self.receive_timestamp_index { break; }
             packet_index = packet_index + 1;
         }
 

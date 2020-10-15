@@ -92,30 +92,40 @@ impl MediaChannelRtpBased {
         }
     }
 
+    /// Get all remote supported codecs.
     pub fn remote_codecs(&self) -> &Vec<Codec> {
         &self.remote_codes
     }
 
+    /// Get all locally supported codecs.
     pub fn local_codecs(&self) -> &Vec<Codec> {
         &self.local_codecs
     }
 
+    /// Get all locally supported codecs.
+    /// Modifying this map will only have an effect before generating an answer.
     pub fn local_codecs_mut(&mut self) -> &mut Vec<Codec> {
         &mut self.local_codecs
     }
 
+    /// Get all remote sources
     pub fn remote_sources(&self) -> &Vec<MediaSource> {
         &self.remote_sources
     }
 
+    /// Get all local sources
     pub fn local_sources(&self) -> &Vec<MediaSource> {
         &self.local_sources
     }
 
+    /// Get all local sources
     pub fn local_sources_mut(&mut self) -> Vec<&mut MediaSource> {
         self.local_sources.iter_mut().collect()
     }
 
+    /// Register a new local source.
+    /// This should be done before generating an answer.
+    /// If not the local source just gets ignored.
     pub fn register_local_source(&mut self) -> &mut MediaSource {
         let source = MediaSource {
             id: rand::random::<u32>(),
@@ -125,25 +135,36 @@ impl MediaChannelRtpBased {
         self.local_sources.last_mut().unwrap()
     }
 
+    /// Get all remote supported extensions
     pub fn remote_extensions(&self) -> &Vec<SdpAttributeExtmap> {
         &self.remote_extensions
     }
 
+    /// Get all local registered extensions
     pub fn local_extensions(&self) -> &Vec<SdpAttributeExtmap> {
         &self.local_extensions
     }
 
+    /// Get all local registered extensions
     pub fn local_extensions_mut(&mut self) -> &mut Vec<SdpAttributeExtmap> {
         &mut self.local_extensions
     }
 
+    /// Send a RTP packet (the ssrc should be a local one!)
     pub fn send_data(&mut self, packet: Vec<u8>) -> Result<(), ()> {
         self.ice_control.send(PeerICEConnectionControl::SendRtpMessage(packet))
             .map_err(|_| ())
     }
 
+    /// Send a control packet
     pub fn send_control_data(&mut self, packet: &RtcpPacket) -> Result<(), ControlDataSendError> {
         self.send_control_data_internal(packet)
+    }
+
+    /// Reset all pending resends for the target stream
+    pub fn reset_pending_resends(&mut self, stream: u32) {
+        self.receiving_sources.get_mut(&stream)
+            .map(|stream| stream.resend_requester.get_mut().reset_resends());
     }
 
     fn send_control_data_internal(&self, packet: &RtcpPacket) -> Result<(), ControlDataSendError> {

@@ -265,7 +265,7 @@ impl PeerConnection {
                     if channel.is_none() {
                         return Err(RemoteDescriptionApplyError::InternalError { detail: String::from("failed to create a new media channel application") });
                     }
-                    Ok(Arc::new(Mutex::new(channel)) as Arc<Mutex<dyn media::MediaChannel>>)
+                    Ok(Arc::new(Mutex::new(channel.unwrap())) as Arc<Mutex<dyn media::MediaChannel>>)
                 },
                 SdpMediaValue::Audio => {
                     Ok(Arc::new(Mutex::new(MediaChannelAudio::new(media_id.clone(), ice_channel_mut.control_sender.clone()))) as Arc<Mutex<dyn media::MediaChannel>>)
@@ -376,6 +376,7 @@ impl PeerConnection {
                 .map_err(|err| RemoteDescriptionApplyError::IceInitializeError { result: err, media_id: media_id.clone() })?;
 
             /* FIXME! */
+            #[cfg(feature = "simulated-loss")]
             connection.set_simulated_loss(20);
 
             let connection = Rc::new(RefCell::new(connection));

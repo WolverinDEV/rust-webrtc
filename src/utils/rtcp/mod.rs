@@ -89,6 +89,17 @@ pub struct RtcpReportBlock {
 }
 
 impl RtcpReportBlock {
+    pub fn new() -> Self {
+        RtcpReportBlock {
+            fraction_lost: 0,
+            cumulative_packets_lost: 0,
+            highest_sequence_received: 0,
+            jitter: 0,
+            timestamp_last_sr: 0,
+            delay_since_last_sr: 0
+        }
+    }
+
     pub fn parse(reader: &mut Cursor<&[u8]>) -> Result<RtcpReportBlock> {
         let fraction_lost = reader.read_u8()?;
         let cumulative_packets_lost = reader.read_u24::<BigEndian>()?;

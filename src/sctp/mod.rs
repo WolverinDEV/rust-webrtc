@@ -346,7 +346,7 @@ impl<T: Read + Write + Unpin> UsrSctpSession<T> {
         let socket = UsrSCTPSocket::new(socket.socket_id);
         if socket.is_none() { return None; }
 
-        let usr_socket_id = socket.target_address_id;
+        let usr_socket_id = socket.as_ref().unwrap().target_address_id;
         Some(UsrSctpSession{
             stream,
             socket: socket.unwrap(),

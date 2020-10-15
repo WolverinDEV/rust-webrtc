@@ -88,7 +88,7 @@ impl MediaChannelApplication {
             write_waker: None
         }));
 
-        let sctp_session = UsrSctpSession::new(SctpStream{ inner: stream }, 5000);
+        let sctp_session = UsrSctpSession::new(SctpStream{ inner: stream.clone() }, 5000);
         if sctp_session.is_none() { return None; }
 
         let (tx, rx) = mpsc::unbounded_channel();
@@ -99,7 +99,7 @@ impl MediaChannelApplication {
             max_incoming_channel: 1024,
             max_outgoing_channel: 1024,
 
-            stream: stream.clone(),
+            stream: stream,
             sctp_session: sctp_session.unwrap(),
             pending_stream_resets: Vec::new(),
 

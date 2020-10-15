@@ -94,3 +94,65 @@ impl RtcpPacketSenderReport {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod test {
+    // Most tests are taken from https://source.chromium.org/chromium/chromium/src/+/master:third_party/webrtc/modules/rtp_rtcp/source/rtcp_packet/sender_report_unittest.cc
+
+    use crate::utils::rtcp::packets::RtcpPacketSenderReport;
+    use std::io::Cursor;
+    use crate::utils::rtcp::RtcpReportBlock;
+
+    const SENDER_SSRC: u32 = 0x12345678;
+    const REMOTE_SSRC: u32 = 0x23456789;
+
+    const NETWORK_TIMESTAMP: u64 = 0x1112141822242628;
+    const RTP_TIMESTAMP: u32 = 0x33343536;
+
+    const PACKET_COUNT: u32 = 0x44454647;
+    const BYTE_COUNT: u32 = 0x55565758;
+
+    const PACKET: [u8; 28] = [0x80, 200,  0x00, 0x06, 0x12, 0x34, 0x56,
+                              0x78, 0x11, 0x12, 0x14, 0x18, 0x22, 0x24,
+                              0x26, 0x28, 0x33, 0x34, 0x35, 0x36, 0x44,
+                              0x45, 0x46, 0x47, 0x55, 0x56, 0x57, 0x58];
+
+    fn do_build(packet: &RtcpPacketSenderReport) -> Vec<u8> {
+        let mut buffer = [0u8; 1024];
+        let mut cursor = Cursor::new(&mut buffer[..]);
+        packet.write(&mut cursor).expect("failed to build packet");
+        let written = cursor.position() as usize;
+        buffer[0..written].to_vec()
+    }
+
+    fn create_basic_sr() ->  RtcpPacketSenderReport {
+        RtcpPacketSenderReport{
+            ssrc: SENDER_SSRC,
+            packet_count: PACKET_COUNT,
+            byte_count: BYTE_COUNT,
+            rtp_timestamp: RTP_TIMESTAMP,
+            network_timestamp: NETWORK_TIMESTAMP,
+            profile_data: None,
+            reports: vec![]
+        }
+    }
+
+    #[test]
+    fn test_create_without_blocks() {
+        let result = do_build(&create_basic_sr());
+        assert_eq!(result, PACKET);
+    }
+
+    #[test]
+    fn test_parse_without_blocks() {
+        let packet = RtcpPacketSenderReport::parse(&mut Cursor::new(&PACKET[..]))
+            .expect("failed to parse packet");
+        assert_eq!(packet.ssrc, SENDER_SSRC);
+        assert_eq!(packet.packet_count, PACKET_COUNT);
+        assert_eq!(packet.byte_count, BYTE_COUNT);
+        assert_eq!(packet.rtp_timestamp, RTP_TIMESTAMP);
+        assert_eq!(packet.network_timestamp, NETWORK_TIMESTAMP);
+        assert_eq!(packet.profile_data, None);
+        assert!(packet.reports.is_empty());
+    }
+}
