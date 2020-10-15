@@ -261,7 +261,11 @@ impl PeerConnection {
 
             let channel = match *media.get_type() {
                 SdpMediaValue::Application => {
-                    Ok(Arc::new(Mutex::new(MediaChannelApplication::new(media_id.clone(), ice_channel_mut.control_sender.clone()))) as Arc<Mutex<dyn media::MediaChannel>>)
+                    let channel = MediaChannelApplication::new(media_id.clone(), ice_channel_mut.control_sender.clone());
+                    if channel.is_none() {
+                        return Err(RemoteDescriptionApplyError::InternalError { detail: String::from("failed to create a new media channel application") });
+                    }
+                    Ok(Arc::new(Mutex::new(channel)) as Arc<Mutex<dyn media::MediaChannel>>)
                 },
                 SdpMediaValue::Audio => {
                     Ok(Arc::new(Mutex::new(MediaChannelAudio::new(media_id.clone(), ice_channel_mut.control_sender.clone()))) as Arc<Mutex<dyn media::MediaChannel>>)

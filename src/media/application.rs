@@ -80,7 +80,7 @@ pub struct MediaChannelApplication {
 }
 
 impl MediaChannelApplication {
-    pub fn new(media_id: MediaId, ice_control: mpsc::UnboundedSender<PeerICEConnectionControl>) -> Self {
+    pub fn new(media_id: MediaId, ice_control: mpsc::UnboundedSender<PeerICEConnectionControl>) -> Option<Self> {
         let stream = Rc::new(RefCell::new(SctpStreamInner {
             read_queue: VecDeque::new(),
             read_index: 0,
@@ -88,8 +88,11 @@ impl MediaChannelApplication {
             write_waker: None
         }));
 
+        let sctp_session = UsrSctpSession::new(SctpStream{ inner: stream }, 5000);
+        if sctp_session.is_none() { return None; }
+
         let (tx, rx) = mpsc::unbounded_channel();
-        MediaChannelApplication {
+        Some(MediaChannelApplication {
             media_id,
             state: MediaChannelApplicationState::Disconnected,
 
@@ -97,7 +100,7 @@ impl MediaChannelApplication {
             max_outgoing_channel: 1024,
 
             stream: stream.clone(),
-            sctp_session: UsrSctpSession::new(SctpStream{ inner: stream }, 5000),
+            sctp_session: sctp_session.unwrap(),
             pending_stream_resets: Vec::new(),
 
             ice_control,
@@ -111,7 +114,7 @@ impl MediaChannelApplication {
 
             channel_communication_receiver: rx,
             channel_communication_sender: tx
-        }
+        })
     }
 
     pub fn data_channels(&self) -> &VecDeque<DataChannel> {

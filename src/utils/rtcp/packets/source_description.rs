@@ -114,8 +114,15 @@ impl SourceDescription {
             SourceDescriptionType::Tool => SourceDescription::Tool(value),
             SourceDescriptionType::Note => SourceDescription::Note(value),
             SourceDescriptionType::Private => {
-                /* FIXME! */
-                SourceDescription::Private { value: String::new(), prefix: String::new() }
+                let mut reader = Cursor::new(value.as_bytes());
+                let prefix_length = reader.read_u8()? as usize;
+                if prefix_length > value.len() - 1 {
+                    return Err(Error::new(ErrorKind::InvalidInput, "invalid private prefix length"));
+                }
+
+                let (mut prefix, value) = value.split_at(1 + prefix_length);
+                prefix = &prefix[1..];
+                SourceDescription::Private { value: String::from(prefix), prefix: String::from(value) }
             }
         })
     }

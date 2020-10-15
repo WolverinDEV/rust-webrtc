@@ -21,9 +21,6 @@ pub enum TypedMediaChannel<'a> {
     Video(&'a mut MediaChannelVideo),
 }
 
-/* TODO: Send this in a ref cell and allow the handler to move the value.
- *       A move would indicate that the event has been consumed and we've no longer to dispatch it.
- */
 pub enum MediaChannelIncomingEvent {
     TransportInitialized,
     DtlsDataReceived(Vec<u8>),

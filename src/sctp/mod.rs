@@ -212,7 +212,8 @@ unsafe extern "C" fn usrsctp_write_callback(
     });
 
     if result.is_err() {
-        /* TODO: Abort! */
+        eprintln!("usrsctp_write_callback(..) catch_unwind received: {:?}", result.unwrap_err());
+        std::process::abort();
     }
 
     0
@@ -249,7 +250,9 @@ unsafe extern "C" fn usrsctp_read_callback(
     });
 
     if result.is_err() {
-        /* TODO: Abort! */
+
+        eprintln!("usrsctp_read_callback(..) catch_unwind received: {:?}", result.unwrap_err());
+        std::process::abort();
     }
 
     1
@@ -268,13 +271,13 @@ pub struct UsrSCTPSocket {
 }
 
 impl UsrSCTPSocket {
-    fn new(target_address_id: u32) -> Self {
-        /* FIXME: Catch errors! */
+    fn new(target_address_id: u32) -> Option<Self> {
         let socket = unsafe { ffi::usrsctp_socket(AF_CONN, SOCK_STREAM, IPPROTO_SCTP, Some(usrsctp_read_callback), None, 0, target_address_id as *mut c_void) };
-        UsrSCTPSocket {
+        if socket.is_null() { return None; }
+        Some(UsrSCTPSocket {
             socket,
             target_address_id
-        }
+        })
     }
 
     /// Returning the underlying user address as mutable void pointer.
@@ -337,20 +340,22 @@ pub struct UsrSctpSession<T: Read + Write + Unpin> {
 }
 
 impl<T: Read + Write + Unpin> UsrSctpSession<T> {
-    pub fn new(stream: T, local_port: u16) -> Self {
+    pub fn new(stream: T, local_port: u16) -> Option<Self> {
         let (socket, rx) = SCTP_INSTANCE.lock().unwrap().create_address();
 
         let socket = UsrSCTPSocket::new(socket.socket_id);
+        if socket.is_none() { return None; }
+
         let usr_socket_id = socket.target_address_id;
-        UsrSctpSession{
+        Some(UsrSctpSession{
             stream,
-            socket,
+            socket: socket.unwrap(),
             socket_channel: rx,
             usr_socket_id,
 
             local_port,
             remote_port: None
-        }
+        })
     }
 
     pub fn connect(&mut self, remote_port: u16) -> UsrSctpConnectResult {
