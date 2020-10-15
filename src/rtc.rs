@@ -3,7 +3,7 @@
 use glib::{MainContext, BoolError};
 use webrtc_sdp::media_type::{SdpMediaValue};
 use std::sync::{Arc, Mutex};
-use webrtc_sdp::attribute_type::{SdpAttributeType, SdpAttribute, SdpAttributeSetup, SdpAttributeMsidSemantic, SdpAttributeGroup, SdpAttributeGroupSemantic};
+use webrtc_sdp::attribute_type::{SdpAttributeType, SdpAttribute, SdpAttributeSetup, SdpAttributeGroup, SdpAttributeGroupSemantic};
 use std::fmt::Debug;
 use futures::{FutureExt, StreamExt};
 use libnice::ice::{Candidate};
@@ -293,7 +293,7 @@ impl PeerConnection {
         answer.add_attribute(SdpAttribute::Group(SdpAttributeGroup{
             semantics: SdpAttributeGroupSemantic::Bundle,
             tags: self.media_channel.keys().into_iter().map(|e| e.1.clone()).collect()
-        }));
+        })).unwrap();
 
         let mut keys = self.media_channel.keys().map(|e| e.clone()).collect::<Vec<MediaId>>();
         keys.sort_by_key(|e| e.0);
@@ -368,8 +368,11 @@ impl PeerConnection {
             /* register a new channel */
             let stream = libnice::ice::Agent::stream_builder(&mut self.ice_agent, 1).build().map_err(|error| RemoteDescriptionApplyError::FailedToAddIceStream { error })?;
 
-            let connection = PeerICEConnection::new(stream, credentials.clone(), media_id.clone(), setup)
+            let mut connection = PeerICEConnection::new(stream, credentials.clone(), media_id.clone(), setup)
                 .map_err(|err| RemoteDescriptionApplyError::IceInitializeError { result: err, media_id: media_id.clone() })?;
+
+            /* FIXME! */
+            connection.set_simulated_loss(20);
 
             let connection = Rc::new(RefCell::new(connection));
             self.ice_channels.push(connection);
@@ -431,6 +434,15 @@ impl PeerConnection {
                                 },
                                 Ok(length) => {
                                     if packets[index] != &buffer[0..length] {
+                                        /*
+                                            FF Pads the SourceDescription elements invalid (https://bugzilla.mozilla.org/show_bug.cgi?id=1671169).
+                                            Example: The CName is 38 characters long adding two (one byte for the description type, the other for the length) results in a length of 40.
+                                            40 has no need to be padded (already on a 32bit boundary). For some reason FF padds the message with two bytes. This results later on in the padding of four zero bytes and result in an over all invalid packet
+                                            Parsed packet: SourceDescription(RtcpPacketSourceDescription { descriptions: [(1308369285, CName("{4b1d1d86-d4bc-44a2-a92d-6e47ee1ed6a3}"))] })
+                                            Created packet is different than source packet:
+                                            Source:  [129, 202, 0, 12, 77, 252, 33, 133, 1, 38, 123, 52, 98, 49, 100, 49, 100, 56, 54, 45, 100, 52, 98, 99, 45, 52, 52, 97, 50, 45, 97, 57, 50, 100, 45, 54, 101, 52, 55, 101, 101, 49, 101, 100, 54, 97, 51, 125, 0, 0, 0, 0]
+                                            Created: [129, 202, 0, 12, 77, 252, 33, 133, 1, 38, 123, 52, 98, 49, 100, 49, 100, 56, 54, 45, 100, 52, 98, 99, 45, 52, 52, 97, 50, 45, 97, 57, 50, 100, 45, 54, 101, 52, 55, 101, 101, 49, 101, 100, 54, 97, 51, 125]
+                                         */
                                         eprintln!("Parsed packet: {:?}", packet);
                                         eprintln!("Created packet is different than source packet:\nSource:  {:?}\nCreated: {:?}", &packets[index], &buffer[0..length]);
                                     }
@@ -454,6 +466,10 @@ impl PeerConnection {
                         eprintln!("Failed to decode RTP packet: {:?}", error);
                     }
                 }
+                None
+            },
+            PeerICEConnectionEvent::MessageDropped(message) => {
+                println!("Dropping received ICE message of length {}", message.len());
                 None
             },
             _ => {
@@ -487,5 +503,25 @@ impl futures::stream::Stream for PeerConnection {
 
         let _ = self.ice_agent.poll_unpin(cx);
         Poll::Pending
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::utils::rtcp::RtcpPacket;
+
+    #[test]
+    fn test_packet_split_up() {
+        let message = [129, 202, 0, 12, 77, 252, 33, 133, 1, 38, 123, 52, 98, 49, 100, 49, 100, 56, 54, 45, 100, 52, 98, 99, 45, 52, 52, 97, 50, 45, 97, 57, 50, 100, 45, 54, 101, 52, 55, 101, 101, 49, 101, 100, 54, 97, 51, 125, 0, 0, 0, 0];
+        let mut packets = [&[0u8][..]; 128];
+        let packet_count = RtcpPacket::split_up_packets(&message[..], &mut packets[..]);
+        assert_eq!(packet_count.unwrap(), 1usize);
+    }
+
+    #[test]
+    fn test_packet_parse() {
+        let message = [129, 202, 0, 12, 77, 252, 33, 133, 1, 38, 123, 52, 98, 49, 100, 49, 100, 56, 54, 45, 100, 52, 98, 99, 45, 52, 52, 97, 50, 45, 97, 57, 50, 100, 45, 54, 101, 52, 55, 101, 101, 49, 101, 100, 54, 97, 51, 125, 0, 0, 0, 0];
+        let parsed = RtcpPacket::parse(&message[..]).expect("failed to decode valid packet");
+        println!("{:?}", parsed);
     }
 }

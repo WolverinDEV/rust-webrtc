@@ -2,32 +2,24 @@
 #![feature(drain_filter)]
 #![feature(try_trait)]
 
-use std::net::{SocketAddr};
-use futures::{StreamExt, SinkExt};
-use futures::future::{Either};
-use tokio_tungstenite::tungstenite::{Message};
-use tokio_tungstenite::WebSocketStream;
+use futures::{StreamExt};
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 
-use serde::{Deserialize, Serialize};
 use webrtc_sdp::parse_sdp;
-use webrtc_sdp::attribute_type::{SdpAttribute, SdpAttributeCandidateTransport, SdpAttributeExtmap};
+use webrtc_sdp::attribute_type::{SdpAttribute, SdpAttributeExtmap};
 use std::sync::{Arc, Mutex};
 use std::ops::DerefMut;
 use std::str::FromStr;
 use futures::task::{Poll, Context};
 use tokio::sync::mpsc;
 use web_test::{rtc, initialize_webrtc};
-use web_test::srtp2::srtp2_global_init;
 use web_test::media::application::{MediaChannelApplication, MediaChannelApplicationEvent};
 use web_test::sctp::message::DataChannelType;
 use web_test::media::audio::MediaChannelAudio;
 use web_test::media::video::{MediaChannelVideo, MediaChannelVideoEvents};
 use web_test::rtc::{PeerConnection, PeerConnectionEvent, RtcDescriptionType, MediaIdFragment};
 use web_test::media::{TypedMediaChannel, MediaChannel};
-use tokio_tungstenite::tungstenite::protocol::Role::Server;
-use std::cell::Cell;
 use crate::shared::gio::MAIN_GIO_EVENT_LOOP;
 use crate::shared::ws::{WebCommand, Client, ClientEvents};
 use web_test::utils::rtcp::RtcpPacket;
@@ -125,6 +117,7 @@ fn poll_audio_channel(channel: &mut MediaChannelAudio, cx: &mut Context) {
     }
 }
 
+static mut SWAP_PACKET: Option<Vec<u8>> = None;
 fn poll_video_channel(channel: &mut MediaChannelVideo, cx: &mut Context) {
     while let Poll::Ready(event) = channel.poll_next_unpin(cx) {
         if !event.is_some() {
@@ -139,17 +132,33 @@ fn poll_video_channel(channel: &mut MediaChannelVideo, cx: &mut Context) {
                     let buffer = packet.create_builder()
                         .ssrc(local_channel.id())
                         .add_csrc(packet.ssrc())
-                        .build();
+                        .build().unwrap();
 
-                    if rand::random::<u8>() < 5 {
-                        println!("Dropping video frame");
-                    } else {
-                        if let Ok(buffer) = buffer {
-                            channel.send_data(buffer);
+                    /*
+                    unsafe {
+                        if SWAP_PACKET.is_none() {
+                            if rand::random::<u8>() < 5 {
+                                println!("Dropping video packet {:?}", packet.parser.sequence_number());
+                                return;
+                            }
+                            println!("Holding video packet {:?} (Frame begin: {})", packet.parser.sequence_number(), packet.parser.mark());
+                            SWAP_PACKET = Some(buffer);
                         } else {
-                            eprintln!("Failed to replay video RTP packet");
+                            channel.send_data(SWAP_PACKET.take().unwrap());
+                            println!("Sending video packet {:?} (Frame begin: {})", packet.parser.sequence_number(), packet.parser.mark());
+                            channel.send_data(buffer);
                         }
                     }
+                    /*
+                    if rand::random::<u8>() < 5 {
+                        println!("Dropping video packet {:?}", packet.parser.sequence_number());
+                    } else {
+                        println!("Sending video packet {:?}", packet.parser.sequence_number());
+                        channel.send_data(buffer);
+                    }
+                     */
+                     */
+                    let _ = channel.send_data(buffer);
                 }
             },
             MediaChannelVideoEvents::RtcpPacketReceived(packet) => {
@@ -158,32 +167,32 @@ fn poll_video_channel(channel: &mut MediaChannelVideo, cx: &mut Context) {
                         println!("RTCP RR: {:?}", report);
                         let mut report = report.clone();
                         report.ssrc = channel.local_sources().first().unwrap().id();
-                        channel.send_control_data(&RtcpPacket::ReceiverReport(report));
+                        let _ = channel.send_control_data(&RtcpPacket::ReceiverReport(report));
                     },
                     RtcpPacket::PayloadFeedback(feedback) => {
                         println!("RTCP PayloadFeedback: {:?}", feedback);
                         /* swap the feedback channels, so we're requesting the feedback from our peer */
                         let mut feedback = feedback.clone();
                         std::mem::swap(&mut feedback.media_ssrc, &mut feedback.ssrc);
-                        channel.send_control_data(&RtcpPacket::PayloadFeedback(feedback));
+                        let _ = channel.send_control_data(&RtcpPacket::PayloadFeedback(feedback));
                     },
                     RtcpPacket::TransportFeedback(feedback) => {
                         println!("RTCP TransportFeedback: {:?}", feedback);
                         /* We've lost a packet. Since we can't re-request that packet, we've already received it, we're requesting a new keyframe */
-                        channel.send_control_data(&RtcpPacket::PayloadFeedback(RtcpPacketPayloadFeedback{
+                        let _ = channel.send_control_data(&RtcpPacket::PayloadFeedback(RtcpPacketPayloadFeedback{
                             feedback: RtcpPayloadFeedback::PictureLossIndication,
                             ssrc: feedback.media_ssrc,
                             media_ssrc: feedback.ssrc
                         }));
                     },
                     _ => {
-                        channel.send_control_data(packet);
+                        let _ = channel.send_control_data(packet);
                         println!("Any RTCP packet: {:?}", packet);
                     }
                 }
             }
             _ => {
-                println!("Video channel event: {:?}", event.unwrap());
+                eprintln!("Video channel event: {:?}", event.unwrap());
             }
         }
     }
@@ -224,18 +233,17 @@ fn spawn_client_peer(client: &mut Client<ClientData>) {
             match event.unwrap() {
                 PeerConnectionEvent::LocalIceCandidate(candidate, media_id) => {
                     if let Some(candidate) = candidate {
-                        tx.send(WebCommand::RtcAddIceCandidate {
+                        let _ = tx.send(WebCommand::RtcAddIceCandidate {
                             candidate: String::from("candidate:") + &candidate.to_string(),
                             media_id: media_id.1,
                             media_index: media_id.0 as u32
-                        }).expect("failed to send local candidate add");
+                        });
                     } else {
-                        tx.send(WebCommand::RtcAddIceCandidate {
+                        let _ = tx.send(WebCommand::RtcAddIceCandidate {
                             candidate: String::from(""),
                             media_id: media_id.1,
                             media_index: media_id.0 as u32
-                        }); //.expect("failed to send local candidate add");
-                        //FIXME: This crashes on FF for some reason
+                        });
                     }
                 }
             }
@@ -256,7 +264,7 @@ fn configure_media_channel(channel: &mut dyn MediaChannel) -> std::result::Resul
             }
 
             println!("Remote offered opus, we're accepting it: {:?}", &opus_codec);
-            let mut codec = opus_codec.unwrap().clone();
+            let codec = opus_codec.unwrap().clone();
             //codec.parameters = None;
             //codec.feedback = None;
             channel.local_codecs_mut().push(codec);
@@ -285,7 +293,7 @@ fn configure_media_channel(channel: &mut dyn MediaChannel) -> std::result::Resul
             }
 
             println!("Remote offered VP8, we're accepting it: {:?}", &vp8_codec);
-            let mut codec = vp8_codec.unwrap().clone();
+            let codec = vp8_codec.unwrap().clone();
             //codec.parameters = None;
             //codec.feedback = None;
             channel.local_codecs_mut().push(codec);

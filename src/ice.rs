@@ -24,7 +24,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use serde::export::Formatter;
 use std::ops::Deref;
-use crate::srtp2::Srtp2;
+use crate::srtp2::{Srtp2, Srtp2ErrorCode};
 use crate::utils::rtp::is_rtp_header;
 use crate::utils::rtcp::is_rtcp_header;
 
@@ -81,6 +81,8 @@ pub enum PeerICEConnectionEvent {
     MessageReceivedDtls(Vec<u8>),
     MessageReceivedRtp(Vec<u8>),
     MessageReceivedRtcp(Vec<u8>),
+    /// We've dropped a message (only when feature `simulated-loss` has been activated)
+    MessageDropped(Vec<u8>),
 
     InternalIoFailed(Vec<u8>, String)
 }
@@ -136,6 +138,9 @@ pub struct PeerICEConnection {
     control_receiver: mpsc::UnboundedReceiver<PeerICEConnectionControl>,
     pub control_sender: mpsc::UnboundedSender<PeerICEConnectionControl>,
 
+    #[cfg(feature = "simulated-loss")]
+    simulated_loss: u8,
+
     last_ice_state: ComponentState,
     ice_stream: libnice::ice::Stream,
 
@@ -144,7 +149,7 @@ pub struct PeerICEConnection {
     /// Internal buffer for the dtls stream
     dtls_buffer: Rc<RefCell<DtlsStreamSource>>,
 
-    srtp: Option<Srtp2>
+    srtp: Option<Srtp2>,
 }
 
 /* TODO: Is this required? */
@@ -269,6 +274,9 @@ impl PeerICEConnection {
             control_receiver: crx,
             control_sender: ctx,
 
+            #[cfg(feature = "simulated-loss")]
+            simulated_loss: 0,
+
             ice_stream: stream,
             dtls_buffer: Rc::new(RefCell::new(dtls_stream)),
 
@@ -313,6 +321,11 @@ impl PeerICEConnection {
         self.media_ids.retain(|entry| entry != media_id);
     }
 
+    #[cfg(feature = "simulated-loss")]
+    pub fn set_simulated_loss(&mut self, loss: u8) {
+        self.simulated_loss = loss;
+    }
+
     fn process_dtls_handshake_result(&mut self, result: Result<ssl::SslStream<DtlsStream>, ssl::HandshakeError<DtlsStream>>) -> Option<PeerICEConnectionEvent> {
         match result {
             Ok(stream) => {
@@ -348,6 +361,11 @@ impl PeerICEConnection {
     }
 
     fn process_incoming_data(&mut self, mut data: Vec<u8>) -> Option<PeerICEConnectionEvent> {
+        #[cfg(feature = "simulated-loss")]
+        if rand::random::<u8>() < self.simulated_loss {
+            return Some(PeerICEConnectionEvent::MessageDropped(data));
+        }
+
         if DtlsStream::is_ssl_packet(&data) {
             self.dtls_buffer.borrow_mut().read_buffer.push_back(data);
         } else if is_rtp_header(data.as_slice()) {
@@ -358,7 +376,11 @@ impl PeerICEConnection {
                         return Some(PeerICEConnectionEvent::MessageReceivedRtp(data));
                     },
                     Err(err) => {
-                        eprintln!("Failed to unprotect rtp packet: {:?}", err);
+                        if err == Srtp2ErrorCode::ReplayFail {
+                            /* we've probably rerequested the packet twice */
+                        } else {
+                            eprintln!("Failed to unprotect rtp packet: {:?}", err);
+                        }
                     }
                 }
             } else {

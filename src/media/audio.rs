@@ -1,11 +1,10 @@
 use crate::media::rtp_based::MediaChannelRtpBased;
 use std::ops::{Deref, DerefMut};
 use crate::rtc::MediaId;
-use crate::ice::{PeerICEConnectionControl, PeerICEConnectionEvent};
+use crate::ice::{PeerICEConnectionControl};
 use tokio::sync::mpsc;
 use crate::media::{MediaChannel, TypedMediaChannel, MediaChannelIncomingEvent};
 use webrtc_sdp::media_type::{SdpMedia, SdpMediaValue};
-use futures::TryStreamExt;
 
 pub struct MediaChannelAudio {
     base: MediaChannelRtpBased

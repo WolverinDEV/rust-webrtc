@@ -1,7 +1,8 @@
-use crate::utils::rtcp::{RtcpReportBlock, read_profile_data, profile_data_length, RtcpPacketType, write_profile_data};
-use std::io::{Cursor, Result, ErrorKind, Error, Read, Write};
+use crate::utils::rtcp::RtcpPacketType;
+use std::io::{Cursor, Result, ErrorKind, Error};
 use byteorder::{ReadBytesExt, BigEndian, WriteBytesExt};
 use std::fmt::{Debug, Formatter};
+use crate::utils::PacketId;
 
 #[derive(Clone)]
 pub struct RtcpFeedbackGenericNACK {
@@ -54,6 +55,31 @@ impl Debug for RtcpFeedbackGenericNACK {
 #[derive(Debug, Clone)]
 pub enum RtcpTransportFeedback {
     GenericNACK(Vec<RtcpFeedbackGenericNACK>),
+}
+
+impl RtcpTransportFeedback {
+    pub fn create_generic_nack(packets: &[PacketId]) -> RtcpTransportFeedback {
+        let mut feedbacks = Vec::new();
+
+        let mut index = 0usize;
+        while index < packets.len() {
+            let head = packets[index].clone();
+            let mut mask = 0u16;
+
+            index = index + 1;
+            while index < packets.len() {
+                let difference = packets[index].difference(&head, Some(256));
+                if difference >= 16 { break; }
+                mask |= 1 << difference;
+
+                index = index + 1;
+            }
+
+            feedbacks.push(RtcpFeedbackGenericNACK{ packet_id: head.packet_id, bitmask_lost_packets: mask });
+        }
+
+        RtcpTransportFeedback::GenericNACK(feedbacks)
+    }
 }
 
 #[derive(Debug, Ord, PartialOrd, Eq, PartialEq)]

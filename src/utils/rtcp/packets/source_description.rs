@@ -1,4 +1,4 @@
-use crate::utils::rtcp::{RtcpReportBlock, read_profile_data, profile_data_length, RtcpPacketType, write_profile_data};
+use crate::utils::rtcp::{RtcpPacketType};
 use std::io::{Cursor, Result, ErrorKind, Error, Read, Write};
 use byteorder::{ReadBytesExt, BigEndian, WriteBytesExt};
 
@@ -98,7 +98,7 @@ impl SourceDescription {
         str_buffer.resize(total_length, 0);
         reader.read_exact(str_buffer.as_mut_slice())?;
         let value = String::from_utf8(str_buffer)
-            .map_err(|err| Error::new(ErrorKind::InvalidInput, "value isn't UTF-8 encoded"))?;
+            .map_err(|_| Error::new(ErrorKind::InvalidInput, "value isn't UTF-8 encoded"))?;
 
         let description_type = SourceDescriptionType::from(description_type);
         if description_type.is_none() {
@@ -121,7 +121,7 @@ impl SourceDescription {
     }
 
     pub fn byte_size(&self) -> usize {
-        2 + match self {
+        2 + ((match self {
             SourceDescription::CName(..) |
             SourceDescription::Name(..) |
             SourceDescription::Email(..) |
@@ -130,7 +130,7 @@ impl SourceDescription {
             SourceDescription::Tool(..) |
             SourceDescription::Note(..) => self.description_value().unwrap().len(),
             SourceDescription::Private { prefix, value } => 1 + prefix.len() + value.len()
-        }
+        } + 3) / 4) * 4
     }
 
     pub fn description_type(&self) -> SourceDescriptionType {
@@ -215,9 +215,7 @@ impl SourceDescription {
 
 #[derive(Clone, Debug)]
 pub struct RtcpPacketSourceDescription {
-    pub descriptions: Vec<(u32, SourceDescription)>,
-    /// This field is not in a RFC, but Firefox somehow sends extra data
-    pub profile_data: Option<Vec<u8>>
+    pub descriptions: Vec<(u32, SourceDescription)>
 }
 
 impl RtcpPacketSourceDescription {
@@ -232,7 +230,7 @@ impl RtcpPacketSourceDescription {
         }
 
         let source_count = (info & 0x3F) as usize;
-        let length = reader.read_u16::<BigEndian>()? as usize * 4 + 4; /* the total packet length */
+        let _ = reader.read_u16::<BigEndian>()? as usize * 4 + 4; /* the total packet length */
 
         let mut descriptions = Vec::with_capacity(source_count);
         for _ in 0..source_count {
@@ -240,18 +238,11 @@ impl RtcpPacketSourceDescription {
             descriptions.push((ssrc, SourceDescription::parse(reader)?));
         }
 
-        let mut result = RtcpPacketSourceDescription {
-            descriptions,
-            profile_data: None
-        };
-        result.profile_data = read_profile_data(reader, length - result.byte_size(), (info & 0x40) != 0)?;
-
-        Ok(result)
+        Ok(RtcpPacketSourceDescription { descriptions })
     }
 
     pub fn byte_size(&self) -> usize {
-        4 + self.descriptions.iter().map(|e| e.1.byte_size() + 4).sum::<usize>() +
-            if let Some(data) = &self.profile_data { data.len() } else { 0 }
+        4 + self.descriptions.iter().map(|e| e.1.byte_size() + 4).sum::<usize>()
     }
 
     pub fn write(&self, writer: &mut Cursor<&mut [u8]>) -> Result<()> {
@@ -260,11 +251,6 @@ impl RtcpPacketSourceDescription {
         }
 
         let mut info = 2 << 6;
-        if let Some(payload) = &self.profile_data {
-            if (payload.len() % 4) != 0 {
-                info |= 1 << 5; /* we've to do some padding */
-            }
-        }
         info |= self.descriptions.len();
         writer.write_u8(info as u8)?;
         writer.write_u8(RtcpPacketType::SourceDescription.value())?;
@@ -275,7 +261,6 @@ impl RtcpPacketSourceDescription {
             description.write(writer)?;
         }
 
-        write_profile_data(writer, &self.profile_data, true)?;
         Ok(())
     }
 }

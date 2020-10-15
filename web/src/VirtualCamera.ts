@@ -407,5 +407,4 @@ class RendererClock extends VirtualCameraRenderer {
             canvas.fillText("come time is ticking", properties.width / 2, properties.height * .60 + 40);
         }
     }
-
 }

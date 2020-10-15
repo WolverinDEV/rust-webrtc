@@ -1,7 +1,6 @@
-use futures::{Stream, StreamExt, Sink, Future, FutureExt, SinkExt, TryFutureExt};
+use futures::{Stream, StreamExt, Future, FutureExt, SinkExt};
 use futures::task::{Context, Poll};
 use tokio::macros::support::Pin;
-use tokio::sync::mpsc;
 use std::net::SocketAddr;
 use tokio_tungstenite::{WebSocketStream, tungstenite};
 use tokio::net::{TcpStream, TcpListener};
@@ -73,7 +72,6 @@ impl<ClientData: Default + Unpin> Stream for Server<ClientData> {
                     }
                 }
             }
-            _ => {}
         }
 
         Poll::Pending
@@ -111,7 +109,7 @@ impl<ClientData: Default + Unpin> Client<ClientData> {
     }
     pub fn send_message(&mut self, message: &WebCommand) {
         if let ClientSocket::Connected(stream) = &mut self.socket {
-            let mut stream = stream.as_mut().unwrap();
+            let stream = stream.as_mut().unwrap();
             if let Err(error) = stream.start_send_unpin(Message::Text(serde_json::to_string(message)
                 .expect("failed to encode WS message"))) {
                 eprintln!("Failed to send WS message: {:?}", error);
@@ -123,7 +121,7 @@ impl<ClientData: Default + Unpin> Client<ClientData> {
 
     pub fn close(&mut self, reason: Option<CloseFrame>) {
         if let ClientSocket::Connected(stream) = &mut self.socket {
-            stream.as_mut().unwrap().start_send_unpin(Message::Close(reason.map(|msg| msg.into_owned())));
+            let _ = stream.as_mut().unwrap().start_send_unpin(Message::Close(reason.map(|msg| msg.into_owned())));
             self.socket = ClientSocket::Closing(stream.take());
         } else {
             eprintln!("Tried to send a message to a not connected client");
@@ -145,8 +143,7 @@ impl<ClientData: Default + Unpin> Stream for Client<ClientData> {
                 return match future.poll_unpin(cx) {
                     Poll::Ready(Ok(socket)) => {
                         self.socket = ClientSocket::Connected(Some(socket));
-                        cx.waker().wake_by_ref();
-                        Poll::Pending
+                        Poll::Ready(Some(ClientEvents::Connected))
                     },
                     Poll::Ready(Err(error)) => {
                         eprintln!("Failed to accept new client: {:?}", error);

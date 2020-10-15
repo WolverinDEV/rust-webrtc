@@ -1,11 +1,10 @@
 #![allow(dead_code)]
 
 use libsrtp2_sys as ffi;
-use core::{ptr, mem};
+use core::{mem};
 use std::os::raw::{c_void, c_int};
 use openssl::srtp::SrtpProfileId;
 use openssl::error::ErrorStack;
-use std::pin::Pin;
 
 /* SRTP stuff (http://tools.ietf.org/html/rfc3711) */
 /* cipher_key_length: 128 bits / 16 bytes, cipher_salt_length: 112 bits / 14 bytes */
@@ -302,7 +301,7 @@ impl Srtp2 {
             remote_policy.key = key_salt_b.as_mut_ptr();
         }
 
-        let mut result = Srtp2::new(&remote_policy, &local_policy)
+        let result = Srtp2::new(&remote_policy, &local_policy)
             .map_err(|err| OpenSSLImportError::SrtpError(err))?;
 
         Ok(result)

@@ -4,7 +4,6 @@ use std::io::{Cursor, Read, Result, Error, Write, Seek, SeekFrom};
 use byteorder::{ReadBytesExt, BigEndian, WriteBytesExt};
 use futures::io::ErrorKind;
 use std::fmt::Debug;
-use serde::export::Formatter;
 
 pub mod packets;
 
@@ -56,12 +55,24 @@ fn profile_data_length(data: &Option<Vec<u8>>) -> usize {
 fn write_profile_data(writer: &mut Cursor<&mut [u8]>, data: &Option<Vec<u8>>, padding: bool) -> Result<()> {
     if let Some(payload) = data {
         writer.write_all(payload)?;
-        if padding && (payload.len() & 0x3) != 0 {
-            let pad_bytes = !(payload.len() & 0x3) + 1;
-            for _ in 0..(pad_bytes - 1) {
-                writer.write_u8(0)?;
+        if padding {
+            /* manual padding, faster than calculating anything */
+            match payload.len() % 4 {
+                0 => {},
+                1 => {
+                    writer.write_u8(0)?;
+                    writer.write_u8(0)?;
+                    writer.write_u8(3)?;
+                },
+                2 => {
+                    writer.write_u8(0)?;
+                    writer.write_u8(2)?;
+                },
+                3 => {
+                    writer.write_u8(1)?;
+                },
+                _ => panic!()
             }
-            writer.write_u8(pad_bytes as u8)?;
         }
     }
     Ok(())
@@ -179,7 +190,9 @@ impl RtcpPacket {
                 return Err(Error::new(ErrorKind::InvalidInput, "packet length invalid"));
             }
             reader.seek(SeekFrom::Current(length as i64 * 4))?;
-
+            if length == 0 {
+                panic!();
+            }
             let packet_end = packet_offset + length as usize * 4 + 4;
             packets[packet_count] = &buffer[packet_offset..packet_end];
             packet_count = packet_count + 1;

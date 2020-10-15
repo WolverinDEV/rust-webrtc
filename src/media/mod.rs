@@ -1,7 +1,6 @@
 use crate::media::application::MediaChannelApplication;
 use crate::rtc::MediaId;
 use webrtc_sdp::media_type::SdpMedia;
-use crate::ice::PeerICEConnectionEvent;
 use crate::media::audio::{MediaChannelAudio};
 use crate::media::video::MediaChannelVideo;
 use std::collections::HashMap;
@@ -9,7 +8,6 @@ use webrtc_sdp::attribute_type::{SdpAttributeType, SdpAttribute, SdpAttributeSsr
 use std::fmt::{Formatter, Debug};
 use webrtc_sdp::error::SdpParserInternalError;
 use crate::utils::rtp::ParsedRtpPacket;
-use std::cell::{Cell, RefCell};
 use crate::utils::rtcp::RtcpPacket;
 
 pub mod application;
@@ -43,7 +41,6 @@ pub trait MediaChannel {
 
     fn process_peer_event(&mut self, event: &mut Option<MediaChannelIncomingEvent>);
 }
-
 
 #[derive(Debug)]
 pub struct MediaSource {

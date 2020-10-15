@@ -127,7 +127,7 @@ function showVideoStream(stream: MediaStream) {
 let virtualCamera: VirtualCamera;
 async function createVirtualCameraStream() : Promise<MediaStream> {
     if(!virtualCamera) {
-        let scale = 0.3;
+        let scale = .4;
         virtualCamera = new VirtualCamera(30, { height: 1024 * scale, width: 1024 * scale });
         virtualCamera.start();
         (window as any).virtualCamera = virtualCamera;

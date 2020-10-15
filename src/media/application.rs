@@ -3,7 +3,7 @@
 use tokio::sync::mpsc;
 use crate::rtc::{MediaId, ACT_PASS_DEFAULT_SETUP_TYPE};
 use webrtc_sdp::media_type::{SdpMedia, SdpMediaLine, SdpMediaValue, SdpFormatList, SdpProtocolValue};
-use crate::ice::{PeerICEConnectionEvent, PeerICEConnectionControl};
+use crate::ice::{PeerICEConnectionControl};
 use webrtc_sdp::attribute_type::{SdpAttribute, SdpAttributeSetup, SdpAttributeSctpmap, SdpAttributeType};
 use webrtc_sdp::SdpConnection;
 use webrtc_sdp::address::ExplicitlyTypedAddress;

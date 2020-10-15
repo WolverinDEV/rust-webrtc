@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
-use crate::media::{MediaChannel, TypedMediaChannel, MediaSource, Codec, MediaChannelIncomingEvent};
-use crate::ice::{PeerICEConnectionEvent, PeerICEConnectionControl};
+use crate::media::{MediaSource, Codec, MediaChannelIncomingEvent};
+use crate::ice::{PeerICEConnectionControl};
 use webrtc_sdp::media_type::{SdpMedia, SdpMediaLine, SdpMediaValue, SdpFormatList, SdpProtocolValue};
 use crate::rtc::MediaId;
 use webrtc_sdp::SdpConnection;
@@ -11,21 +11,37 @@ use tokio::sync::mpsc;
 use futures::{Stream, StreamExt};
 use futures::task::{Context, Poll};
 use tokio::macros::support::Pin;
-use webrtc_sdp::attribute_type::{SdpAttribute, SdpAttributeFmtpParameters, SdpAttributeRtcpFbType, SdpAttributeRtpmap, SdpAttributeFmtp, SdpAttributeDirection, SdpAttributeRtcpFb, SdpAttributePayloadType, SdpAttributeType, SdpAttributeSsrc, SdpAttributeExtmap, SdpAttributeMsid};
-use webrtc_sdp::error::SdpParserInternalError;
+use webrtc_sdp::attribute_type::{SdpAttribute, SdpAttributeDirection, SdpAttributeType, SdpAttributeExtmap};
 use std::fmt::Debug;
-use serde::export::Formatter;
 use crate::utils::rtcp::RtcpPacket;
-use std::collections::HashMap;
-use std::io::Cursor;
+use std::collections::{HashMap, BTreeMap};
 use crate::utils::rtp::ParsedRtpPacket;
+use crate::utils::{RtpPacketResendRequester, PacketId, RtpPacketResendRequesterEvent};
+use crate::utils::rtcp::packets::{RtcpPacketTransportFeedback, RtcpTransportFeedback};
+use std::cell::RefCell;
+use std::io::Error;
 
 /* TODO: When looking at extensions https://github.com/zxcpoiu/webrtc/blob/ea3dddf1d0880e89d84a7e502f65c65993d4169d/modules/rtp_rtcp/source/rtp_packet_received.cc#L50 */
 
+struct ReceivingMediaSource {
+    /// The remote media stream id
+    id: u32,
+    resend_requester: RefCell<RtpPacketResendRequester>,
+}
+
 #[derive(Debug)]
 pub enum MediaChannelRtpBasedEvents {
+    /// We've received some data
     DataReceived(ParsedRtpPacket),
-    RtcpPacketReceived(RtcpPacket)
+    /// Some data has been lost and will not be re-requested by generic nacks any more
+    DataLost(Vec<u16>),
+    /// We've received a control packet
+    RtcpPacketReceived(RtcpPacket),
+}
+
+pub enum ControlDataSendError {
+    BuildFailed(Error),
+    SendFailed
 }
 
 pub struct MediaChannelRtpBased {
@@ -46,6 +62,8 @@ pub struct MediaChannelRtpBased {
 
     event_sender: mpsc::UnboundedSender<MediaChannelRtpBasedEvents>,
     event_receiver: mpsc::UnboundedReceiver<MediaChannelRtpBasedEvents>,
+
+    receiving_sources: BTreeMap<u32, ReceivingMediaSource>,
 }
 
 impl MediaChannelRtpBased {
@@ -68,7 +86,9 @@ impl MediaChannelRtpBased {
             local_extensions: Vec::new(),
 
             event_sender: tx,
-            event_receiver: rx
+            event_receiver: rx,
+
+            receiving_sources: BTreeMap::new()
         }
     }
 
@@ -117,16 +137,27 @@ impl MediaChannelRtpBased {
         &mut self.local_extensions
     }
 
-    pub fn send_data(&mut self, packet: Vec<u8>) {
-        self.ice_control.send(PeerICEConnectionControl::SendRtpMessage(packet));
+    pub fn send_data(&mut self, packet: Vec<u8>) -> Result<(), ()> {
+        self.ice_control.send(PeerICEConnectionControl::SendRtpMessage(packet))
+            .map_err(|_| ())
     }
 
-    pub fn send_control_data(&mut self, packet: &RtcpPacket) {
-        let mut buffer = [0u8; 2048];
-        let length = packet.write(&mut buffer)
-            .expect("failed to create rtcp packet");
+    pub fn send_control_data(&mut self, packet: &RtcpPacket) -> Result<(), ControlDataSendError> {
+        self.send_control_data_internal(packet)
+    }
 
-        self.ice_control.send(PeerICEConnectionControl::SendRtcpMessage(buffer[0..length].to_vec()));
+    fn send_control_data_internal(&self, packet: &RtcpPacket) -> Result<(), ControlDataSendError> {
+        let mut buffer = [0u8; 2048];
+        let write_result = packet.write(&mut buffer);
+        if let Err(error) = write_result {
+            return Err(ControlDataSendError::BuildFailed(error));
+        }
+
+        if let Err(_) = self.ice_control.send(PeerICEConnectionControl::SendRtcpMessage(buffer[0..write_result.unwrap()].to_vec())) {
+            return Err(ControlDataSendError::SendFailed);
+        }
+
+        Ok(())
     }
 }
 
@@ -161,6 +192,10 @@ impl MediaChannelRtpBased {
                 }
 
                 self.remote_sources.push(MediaSource::parse_sdp(source.id, media));
+                self.receiving_sources.insert(source.id, ReceivingMediaSource{
+                    id: source.id,
+                    resend_requester: RefCell::new(RtpPacketResendRequester::new())
+                });
             }
         }
 
@@ -219,16 +254,17 @@ impl MediaChannelRtpBased {
     pub fn process_peer_event(&mut self, event: &mut Option<MediaChannelIncomingEvent>) {
         match event.as_ref().unwrap() {
             MediaChannelIncomingEvent::RtpPacketReceived(packet) => {
-                if let Some(_) = self.remote_sources.iter().find(|e| e.id == packet.parser.ssrc()) {
+                if let Some(receiver) = self.receiving_sources.get_mut(&packet.parser.ssrc()) {
+                    RefCell::get_mut(&mut receiver.resend_requester).handle_packet_received(PacketId::new(u16::from(packet.parser.sequence_number())));
                     if let MediaChannelIncomingEvent::RtpPacketReceived(packet) = event.take().unwrap() {
-                        self.event_sender.send(MediaChannelRtpBasedEvents::DataReceived(packet));
+                        let _ = self.event_sender.send(MediaChannelRtpBasedEvents::DataReceived(packet));
                     }
                 } else {
                     /* the packet is not from interest for use ;) */
                 }
             },
             MediaChannelIncomingEvent::RtcpPacketReceived(packet) => {
-                self.event_sender.send(MediaChannelRtpBasedEvents::RtcpPacketReceived(packet.clone()));
+                let _ = self.event_sender.send(MediaChannelRtpBasedEvents::RtcpPacketReceived(packet.clone()));
                 //println!("RTCP Packet: {:?}", packet);
                 /*
                 match packet.clone() {
@@ -258,6 +294,33 @@ impl Stream for MediaChannelRtpBased {
     type Item = MediaChannelRtpBasedEvents;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.event_receiver.poll_next_unpin(cx)
+        for (_, receiver) in self.receiving_sources.iter() {
+            while let Poll::Ready(Some(event)) = RefCell::borrow_mut(&receiver.resend_requester).poll_next_unpin(cx) {
+                match event {
+                    RtpPacketResendRequesterEvent::ResendPackets(packets) => {
+                        let feedback = RtcpPacketTransportFeedback {
+                            ssrc: 1,
+                            media_ssrc: receiver.id,
+                            feedback: RtcpTransportFeedback::create_generic_nack(packets.as_slice())
+                        };
+
+                        println!("Resending packets on {} {:?} -> {:?}", receiver.id, packets, &feedback);
+                        let _ = self.send_control_data_internal(&RtcpPacket::TransportFeedback(feedback));
+                    },
+                    RtpPacketResendRequesterEvent::PacketTimedOut(packet) => {
+                        return Poll::Ready(Some(MediaChannelRtpBasedEvents::DataLost(packet.iter().map(|e| e.packet_id).collect())))
+                    },
+                    _ => {
+                        eprintln!("Resend event on {}: {:?}", receiver.id, event);
+                    }
+                }
+            }
+        }
+
+        if let Poll::Ready(event) = self.event_receiver.poll_next_unpin(cx) {
+            Poll::Ready(event)
+        } else {
+            Poll::Pending
+        }
     }
 }

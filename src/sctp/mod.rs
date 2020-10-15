@@ -3,7 +3,6 @@
 use libusrsctp_sys as ffi;
 use std::pin::Pin;
 use std::os::raw::{c_void, c_char};
-use std::ptr::slice_from_raw_parts_mut;
 use std::sync::{Mutex, Arc};
 use lazy_static::lazy_static;
 use libusrsctp_sys::{usrsctp_conninput, usrsctp_close, usrsctp_setsockopt, usrsctp_set_non_blocking, usrsctp_sendv, usrsctp_getsockopt};

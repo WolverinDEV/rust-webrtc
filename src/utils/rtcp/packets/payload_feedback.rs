@@ -1,7 +1,7 @@
-use crate::utils::rtcp::{RtcpReportBlock, read_profile_data, profile_data_length, RtcpPacketType, write_profile_data};
+use crate::utils::rtcp::{RtcpPacketType};
 use std::io::{Cursor, Result, ErrorKind, Error, Read, Write};
 use byteorder::{ReadBytesExt, BigEndian, WriteBytesExt};
-use std::fmt::{Debug, Formatter};
+use std::fmt::{Debug};
 
 #[derive(Debug, Clone)]
 pub enum RtcpPayloadFeedback {
@@ -123,14 +123,14 @@ impl RtcpPacketPayloadFeedback {
     pub fn write(&self, writer: &mut Cursor<&mut [u8]>) -> Result<()> {
         let mut info = 2 << 6;
         info |= self.feedback_type().id();
-        writer.write_u8(info as u8)?;
-        writer.write_u8(RtcpPacketType::PayloadFeedback.value())?;
 
         let fb_byte_size = self.feedback_byte_size();
         if (fb_byte_size % 4) != 0 {
             /* set the padding flag */
             info |= 1 << 5;
         }
+        writer.write_u8(info as u8)?;
+        writer.write_u8(RtcpPacketType::PayloadFeedback.value())?;
         writer.write_u16::<BigEndian>((2 + (fb_byte_size + 3) / 4) as u16)?;
         writer.write_u32::<BigEndian>(self.ssrc)?;
         writer.write_u32::<BigEndian>(self.media_ssrc)?;
