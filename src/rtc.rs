@@ -372,12 +372,15 @@ impl PeerConnection {
             /* register a new channel */
             let stream = libnice::ice::Agent::stream_builder(&mut self.ice_agent, 1).build().map_err(|error| RemoteDescriptionApplyError::FailedToAddIceStream { error })?;
 
+            #[allow(unused_mut)]
             let mut connection = PeerICEConnection::new(stream, credentials.clone(), media_id.clone(), setup)
                 .map_err(|err| RemoteDescriptionApplyError::IceInitializeError { result: err, media_id: media_id.clone() })?;
 
             /* FIXME! */
             #[cfg(feature = "simulated-loss")]
-            connection.set_simulated_loss(20);
+            {
+                //connection.set_simulated_loss(20);
+            }
 
             let connection = Rc::new(RefCell::new(connection));
             self.ice_channels.push(connection);

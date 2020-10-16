@@ -147,8 +147,28 @@ async function initializePeerVideo(peer: RTCPeerConnection) {
         stream = await createVirtualCameraStream();
     }
 
-    stream.getVideoTracks().forEach(track => peer.addTrack(track));
+    let sender = peer.addTrack(stream.getVideoTracks()[0]);
     showVideoStream(stream);
+
+    setTimeout(() => {
+        const clone = stream.getVideoTracks()[0].clone();
+        peer.addTrack(clone);
+        setTimeout(async () => {
+            console.log("Track end");
+            peer.removeTrack(sender);
+            setTimeout(async () => {
+                console.log("Add new track");
+
+                stream = await createVirtualCameraStream();
+                peer.addTrack(stream.getVideoTracks()[0].clone());
+
+                setTimeout(() => {
+                    console.log("Add new track 2");
+                    peer.addTrack(stream.getVideoTracks()[0].clone());
+                }, 5000);
+            }, 5000);
+        }, 5000);
+    }, 5000);
     //audioContext.createMediaStreamSource(microphoneStream).connect(audioContext.destination);
 }
 
@@ -185,9 +205,9 @@ async function initializePeer() {
             console.warn("Received track without a video stream.");
             return;
         }
+        console.log("[AUD] Received remote %s track %s (%s) %s", event.track.kind, event.track.id, event.track.label, event.streams[0]?.id);
         if(event.track.kind === "audio") {
             console.error("Streams: %o", event.streams);
-            console.log("[AUD] Received remote %s track %s (%s) %s", event.track.kind, event.track.id, event.track.label, event.streams[0]?.id);
             event.track.onmute = () => console.log("[AUD] Muted %s", event.track.id);
             event.track.onunmute = () => console.log("[AUD] Unmute %s", event.track.id);
             event.track.onended = () => console.log("[AUD] Ended %s", event.track.id);
@@ -216,6 +236,21 @@ async function initializePeer() {
         }
     };
 
+    peer.onnegotiationneeded = async () => {
+        console.error("Nego needed");
+
+        let offer = await peer.createOffer({
+            offerToReceiveAudio: kEnableAudio,
+            offerToReceiveVideo: kEnableVideo
+        });
+        console.error("New offer:\n%s", (await peer.createOffer()).sdp);
+        await peer.setLocalDescription(offer);
+
+        console.log("[SDP] Offer:\n%s", offer.sdp);
+        sendCommand("RtcSetRemoteDescription", { sdp: offer.sdp, mode: "offer" });
+        console.error(offer);
+    }
+
     //await initializePeerApplication(peer);
 
     const kEnableAudio = false;
@@ -228,6 +263,7 @@ async function initializePeer() {
         await initializePeerVideo(peer);
     }
 
+    return;
     const offer = await peer.createOffer({
         offerToReceiveAudio: kEnableAudio,
         offerToReceiveVideo: kEnableVideo

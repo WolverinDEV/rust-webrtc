@@ -16,7 +16,7 @@ use std::fmt::Debug;
 use crate::utils::rtcp::RtcpPacket;
 use std::collections::{HashMap, BTreeMap};
 use crate::utils::rtp::ParsedRtpPacket;
-use crate::utils::{RtpPacketResendRequester, PacketId, RtpPacketResendRequesterEvent};
+use crate::utils::{RtpPacketResendRequester, SequenceNumber, RtpPacketResendRequesterEvent};
 use crate::utils::rtcp::packets::{RtcpPacketTransportFeedback, RtcpTransportFeedback};
 use std::cell::RefCell;
 use std::io::Error;
@@ -276,7 +276,7 @@ impl MediaChannelRtpBased {
         match event.as_ref().unwrap() {
             MediaChannelIncomingEvent::RtpPacketReceived(packet) => {
                 if let Some(receiver) = self.receiving_sources.get_mut(&packet.parser.ssrc()) {
-                    RefCell::get_mut(&mut receiver.resend_requester).handle_packet_received(PacketId::new(u16::from(packet.parser.sequence_number())));
+                    RefCell::get_mut(&mut receiver.resend_requester).handle_packet_received(SequenceNumber::new(u16::from(packet.parser.sequence_number())));
                     if let MediaChannelIncomingEvent::RtpPacketReceived(packet) = event.take().unwrap() {
                         let _ = self.event_sender.send(MediaChannelRtpBasedEvents::DataReceived(packet));
                     }

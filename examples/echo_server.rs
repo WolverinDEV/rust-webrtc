@@ -24,8 +24,11 @@ use crate::shared::gio::MAIN_GIO_EVENT_LOOP;
 use crate::shared::ws::{WebCommand, Client, ClientEvents};
 use web_test::utils::rtcp::RtcpPacket;
 use web_test::utils::rtcp::packets::{RtcpPayloadFeedback, RtcpPacketPayloadFeedback};
+use crate::video::VP8PayloadDescriptor;
+use rtp_rs::Seq;
 
 mod shared;
+mod video;
 
 struct ClientData {
     event_loop: Option<glib::MainLoop>,
@@ -118,6 +121,7 @@ fn poll_audio_channel(channel: &mut MediaChannelAudio, cx: &mut Context) {
 }
 
 static mut SWAP_PACKET: Option<Vec<u8>> = None;
+static mut PACKET_ID: u16 = 0;
 fn poll_video_channel(channel: &mut MediaChannelVideo, cx: &mut Context) {
     while let Poll::Ready(event) = channel.poll_next_unpin(cx) {
         if !event.is_some() {
@@ -127,10 +131,27 @@ fn poll_video_channel(channel: &mut MediaChannelVideo, cx: &mut Context) {
 
         match event.as_ref().unwrap() {
             MediaChannelVideoEvents::DataReceived(packet) => {
-                let local_channel = channel.local_sources().first();
+                {
+                    let description = VP8PayloadDescriptor::parse(packet.payload());
+                    if description.is_err() {
+                        eprintln!("Failed to parse the VP8Payload: {:?}", description.unwrap_err());
+                    } else {
+                        let description = description.unwrap();
+                        println!("Parsed VP8Payload (marked: {}): {:?}", packet.mark(), description);
+                        if packet.mark() && description.partition_start {
+                            if rand::random::<u8>() < 30 {
+                                //eprintln!("Dropping frame");
+                                //continue;
+                            }
+                        }
+                    }
+                }
+
+                let local_channel = channel.local_sources().get(0);
                 if let Some(local_channel) = local_channel {
                     let buffer = packet.create_builder()
                         .ssrc(local_channel.id())
+                        .sequence(Seq::from(unsafe { PACKET_ID += 1; PACKET_ID }))
                         .add_csrc(packet.ssrc())
                         .build().unwrap();
 

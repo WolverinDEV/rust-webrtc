@@ -1,4 +1,5 @@
 #![feature(seek_convenience)]
+#![feature(trait_alias)]
 
 use crate::srtp2::srtp2_global_init;
 

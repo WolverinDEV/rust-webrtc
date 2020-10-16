@@ -2,7 +2,7 @@ use crate::utils::rtcp::RtcpPacketType;
 use std::io::{Cursor, Result, ErrorKind, Error};
 use byteorder::{ReadBytesExt, BigEndian, WriteBytesExt};
 use std::fmt::{Debug, Formatter};
-use crate::utils::PacketId;
+use crate::utils::SequenceNumber;
 
 #[derive(Clone)]
 pub struct RtcpFeedbackGenericNACK {
@@ -58,7 +58,7 @@ pub enum RtcpTransportFeedback {
 }
 
 impl RtcpTransportFeedback {
-    pub fn create_generic_nack(packets: &[PacketId]) -> RtcpTransportFeedback {
+    pub fn create_generic_nack(packets: &[SequenceNumber<u16>]) -> RtcpTransportFeedback {
         let mut feedbacks = Vec::new();
 
         let mut index = 0usize;
