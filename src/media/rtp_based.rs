@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use crate::media::{MediaSource, Codec, MediaChannelIncomingEvent};
-use crate::ice::{PeerICEConnectionControl};
+use crate::transport::{RTCTransportControl};
 use webrtc_sdp::media_type::{SdpMedia, SdpMediaLine, SdpMediaValue, SdpFormatList, SdpProtocolValue};
 use crate::rtc::MediaId;
 use webrtc_sdp::SdpConnection;
@@ -49,7 +49,7 @@ pub struct MediaChannelRtpBased {
     media_id: MediaId,
     direction: SdpAttributeDirection,
 
-    ice_control: mpsc::UnboundedSender<PeerICEConnectionControl>,
+    ice_control: mpsc::UnboundedSender<RTCTransportControl>,
 
     remote_codes: Vec<Codec>,
     local_codecs: Vec<Codec>,
@@ -67,7 +67,7 @@ pub struct MediaChannelRtpBased {
 }
 
 impl MediaChannelRtpBased {
-    pub fn new(media_type: SdpMediaValue, media_id: MediaId, ice_control: mpsc::UnboundedSender<PeerICEConnectionControl>) -> Self {
+    pub fn new(media_type: SdpMediaValue, media_id: MediaId, ice_control: mpsc::UnboundedSender<RTCTransportControl>) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         MediaChannelRtpBased {
             media_type,
@@ -152,7 +152,7 @@ impl MediaChannelRtpBased {
 
     /// Send a RTP packet (the ssrc should be a local one!)
     pub fn send_data(&mut self, packet: Vec<u8>) -> Result<(), ()> {
-        self.ice_control.send(PeerICEConnectionControl::SendRtpMessage(packet))
+        self.ice_control.send(RTCTransportControl::SendRtpMessage(packet))
             .map_err(|_| ())
     }
 
@@ -174,7 +174,7 @@ impl MediaChannelRtpBased {
             return Err(ControlDataSendError::BuildFailed(error));
         }
 
-        if let Err(_) = self.ice_control.send(PeerICEConnectionControl::SendRtcpMessage(buffer[0..write_result.unwrap()].to_vec())) {
+        if let Err(_) = self.ice_control.send(RTCTransportControl::SendRtcpMessage(buffer[0..write_result.unwrap()].to_vec())) {
             return Err(ControlDataSendError::SendFailed);
         }
 

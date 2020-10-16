@@ -71,7 +71,7 @@ pub enum PeerICEConnectionState {
 }
 
 #[derive(Clone, Debug)]
-pub enum PeerICEConnectionEvent {
+pub enum RTCTransportEvent {
     StreamStateChanged(ComponentState),
     LocalIceCandidate(DebugableCandidate),
     LocalIceGatheringFinished(),
@@ -88,14 +88,14 @@ pub enum PeerICEConnectionEvent {
 }
 
 #[derive(Clone, Debug)]
-pub enum PeerICEConnectionControl {
+pub enum RTCTransportControl {
     SendMessage(Vec<u8>),
     SendRtpMessage(Vec<u8>),
     SendRtcpMessage(Vec<u8>)
 }
 
 #[derive(Debug)]
-pub enum ICEConnectionInitializeError {
+pub enum RTCTransportInitializeError {
     PrivateKeyGenFailed{ stack: ErrorStack },
     CertificateGenFailed{ stack: ErrorStack },
     FingerprintGenFailed{ stack: ErrorStack },
@@ -103,7 +103,7 @@ pub enum ICEConnectionInitializeError {
 }
 
 #[derive(Debug)]
-pub enum ICECandidateAddError {
+pub enum RTCTransportICECandidateAddError {
     UnknownMediaChannel,
     RemoteCandidatesAlreadyReceived,
     FqdnNotYetSupported,
@@ -117,7 +117,7 @@ enum DTLSState {
     Failed()
 }
 
-pub struct PeerICEConnection {
+pub struct RTCTransport {
     /// Index of the "owning" media line
     pub owning_media_id: MediaId,
     /// Containing all media lines which actively listening to the channel events (bundled channels)
@@ -135,8 +135,8 @@ pub struct PeerICEConnection {
     local_candidates_gathered: bool,
     remote_candidates_gathered: bool,
 
-    control_receiver: mpsc::UnboundedReceiver<PeerICEConnectionControl>,
-    pub control_sender: mpsc::UnboundedSender<PeerICEConnectionControl>,
+    control_receiver: mpsc::UnboundedReceiver<RTCTransportControl>,
+    pub control_sender: mpsc::UnboundedSender<RTCTransportControl>,
 
     #[cfg(feature = "simulated-loss")]
     simulated_loss: u8,
@@ -152,55 +152,52 @@ pub struct PeerICEConnection {
     srtp: Option<Srtp2>,
 }
 
-/* TODO: Is this required? */
-unsafe impl Send for PeerICEConnection {}
-
-impl PeerICEConnection {
-    fn generate_ssl_components() -> Result<(pkey::PKey<pkey::Private>, x509::X509, SdpAttributeFingerprint, ssl::Ssl), ICEConnectionInitializeError> {
+impl RTCTransport {
+    fn generate_ssl_components() -> Result<(pkey::PKey<pkey::Private>, x509::X509, SdpAttributeFingerprint, ssl::Ssl), RTCTransportInitializeError> {
         let private_key = rsa::Rsa::generate_with_e(4096, &BigNum::from_u32(0x10001u32).unwrap())
-            .map_err(|stack| ICEConnectionInitializeError::PrivateKeyGenFailed {stack})?;
+            .map_err(|stack| RTCTransportInitializeError::PrivateKeyGenFailed {stack})?;
 
         let private_key = pkey::PKey::from_rsa(private_key)
-            .map_err(|stack| ICEConnectionInitializeError::PrivateKeyGenFailed {stack})?;
+            .map_err(|stack| RTCTransportInitializeError::PrivateKeyGenFailed {stack})?;
 
         let certificate = {
             let subject = {
                 let mut builder = x509::X509NameBuilder::new().unwrap();
                 builder.append_entry_by_text("CN", "WebRTC - IMM")
-                    .map_err(|stack| ICEConnectionInitializeError::CertificateGenFailed{ stack })?;
+                    .map_err(|stack| RTCTransportInitializeError::CertificateGenFailed{ stack })?;
                 builder.build()
             };
 
             let mut cert_builder = x509::X509::builder()
-                .map_err(|stack| ICEConnectionInitializeError::CertificateGenFailed{ stack })?;
+                .map_err(|stack| RTCTransportInitializeError::CertificateGenFailed{ stack })?;
 
             cert_builder.set_pubkey(&private_key)
-                .map_err(|stack| ICEConnectionInitializeError::CertificateGenFailed{ stack })?;
+                .map_err(|stack| RTCTransportInitializeError::CertificateGenFailed{ stack })?;
 
             cert_builder.set_version(0)
-                .map_err(|stack| ICEConnectionInitializeError::CertificateGenFailed{ stack })?;
+                .map_err(|stack| RTCTransportInitializeError::CertificateGenFailed{ stack })?;
 
             cert_builder.set_subject_name(&subject)
-                .map_err(|stack| ICEConnectionInitializeError::CertificateGenFailed{ stack })?;
+                .map_err(|stack| RTCTransportInitializeError::CertificateGenFailed{ stack })?;
 
             cert_builder.set_issuer_name(&subject)
-                .map_err(|stack| ICEConnectionInitializeError::CertificateGenFailed{ stack })?;
+                .map_err(|stack| RTCTransportInitializeError::CertificateGenFailed{ stack })?;
 
             cert_builder.set_not_before(&Asn1Time::from_unix(0).unwrap())
-                .map_err(|stack| ICEConnectionInitializeError::CertificateGenFailed{ stack })?;
+                .map_err(|stack| RTCTransportInitializeError::CertificateGenFailed{ stack })?;
 
             cert_builder.set_not_after(&Asn1Time::days_from_now(14).unwrap())
-                .map_err(|stack| ICEConnectionInitializeError::CertificateGenFailed{ stack })?;
+                .map_err(|stack| RTCTransportInitializeError::CertificateGenFailed{ stack })?;
 
             cert_builder.sign(&private_key, MessageDigest::sha1())
-                .map_err(|stack| ICEConnectionInitializeError::CertificateGenFailed{ stack })?;
+                .map_err(|stack| RTCTransportInitializeError::CertificateGenFailed{ stack })?;
 
             cert_builder.build()
         };
 
         let fingerprint = {
             let fingerprint = certificate.digest(MessageDigest::sha256())
-                .map_err(|stack| ICEConnectionInitializeError::FingerprintGenFailed{ stack })?;
+                .map_err(|stack| RTCTransportInitializeError::FingerprintGenFailed{ stack })?;
 
             SdpAttributeFingerprint{
                 fingerprint: fingerprint.to_vec(),
@@ -210,22 +207,22 @@ impl PeerICEConnection {
 
         let ctx = {
             let mut builder = ssl::SslContext::builder(SslMethod::dtls())
-                .map_err(|stack| ICEConnectionInitializeError::SslInitFailed { stack })?;
+                .map_err(|stack| RTCTransportInitializeError::SslInitFailed { stack })?;
 
             builder.set_tlsext_use_srtp("SRTP_AES128_CM_SHA1_80:SRTP_AES128_CM_SHA1_32")
-                .map_err(|stack| ICEConnectionInitializeError::SslInitFailed { stack })?;
+                .map_err(|stack| RTCTransportInitializeError::SslInitFailed { stack })?;
 
             builder.set_private_key(&private_key)
-                .map_err(|stack| ICEConnectionInitializeError::SslInitFailed { stack })?;
+                .map_err(|stack| RTCTransportInitializeError::SslInitFailed { stack })?;
 
             builder.set_certificate(&certificate)
-                .map_err(|stack| ICEConnectionInitializeError::SslInitFailed { stack })?;
+                .map_err(|stack| RTCTransportInitializeError::SslInitFailed { stack })?;
 
             builder.build()
         };
 
         let ssl = ssl::Ssl::new(&ctx)
-            .map_err(|stack| ICEConnectionInitializeError::SslInitFailed { stack })?;
+            .map_err(|stack| RTCTransportInitializeError::SslInitFailed { stack })?;
 
         Ok((private_key, certificate, fingerprint, ssl))
     }
@@ -234,11 +231,11 @@ impl PeerICEConnection {
                remote_credentials: ICECredentials,
                media_id: MediaId,
                setup: SdpAttributeSetup
-    ) -> Result<PeerICEConnection, ICEConnectionInitializeError> {
+    ) -> Result<RTCTransport, RTCTransportInitializeError> {
         assert_eq!(stream.components().len(), 1, "expected only one stream component");
 
 
-        let (private_key, certificate, fingerprint, ssl) = PeerICEConnection::generate_ssl_components()?;
+        let (private_key, certificate, fingerprint, ssl) = RTCTransport::generate_ssl_components()?;
         stream.set_remote_credentials(CString::new(remote_credentials.username.clone()).unwrap(), CString::new(remote_credentials.password.clone()).unwrap());
 
         let dtls_stream = DtlsStreamSource{
@@ -250,7 +247,7 @@ impl PeerICEConnection {
 
         let (ctx, crx) = mpsc::unbounded_channel();
 
-        let connection = PeerICEConnection{
+        let connection = RTCTransport {
             owning_media_id: media_id,
             media_ids: Vec::with_capacity(3),
 
@@ -287,13 +284,13 @@ impl PeerICEConnection {
         Ok(connection)
     }
 
-    pub fn add_remote_candidate(&mut self, candidate: Option<&Candidate>) -> Result<(), ICECandidateAddError> {
+    pub fn add_remote_candidate(&mut self, candidate: Option<&Candidate>) -> Result<(), RTCTransportICECandidateAddError> {
         if self.remote_candidates_gathered {
-            Err(ICECandidateAddError::RemoteCandidatesAlreadyReceived)
+            Err(RTCTransportICECandidateAddError::RemoteCandidatesAlreadyReceived)
         } else if let Some(candidate) = candidate {
             let candidate = candidate.clone();
             if let Address::Fqdn(_address) = &candidate.address {
-                Err(ICECandidateAddError::FqdnNotYetSupported)
+                Err(RTCTransportICECandidateAddError::FqdnNotYetSupported)
                 /*
                 if address.ends_with(".local") {
                     candidate.address = Address::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST));
@@ -301,7 +298,7 @@ impl PeerICEConnection {
                 */
             } else {
                 if candidate.component as usize > self.ice_stream.components().len() {
-                    Err(ICECandidateAddError::InvalidComponentIndex)
+                    Err(RTCTransportICECandidateAddError::InvalidComponentIndex)
                 } else {
                     self.ice_stream.add_remote_candidate(candidate);
                     Ok(())
@@ -326,7 +323,7 @@ impl PeerICEConnection {
         self.simulated_loss = loss;
     }
 
-    fn process_dtls_handshake_result(&mut self, result: Result<ssl::SslStream<DtlsStream>, ssl::HandshakeError<DtlsStream>>) -> Option<PeerICEConnectionEvent> {
+    fn process_dtls_handshake_result(&mut self, result: Result<ssl::SslStream<DtlsStream>, ssl::HandshakeError<DtlsStream>>) -> Option<RTCTransportEvent> {
         match result {
             Ok(stream) => {
                 match Srtp2::from_openssl(stream.ssl()) {
@@ -337,7 +334,7 @@ impl PeerICEConnection {
                     }
                 }
                 self.dtls = Some(DTLSState::Connected(stream));
-                Some(PeerICEConnectionEvent::DtlsInitialized())
+                Some(RTCTransportEvent::DtlsInitialized())
             },
             Err(error) => {
                 match error {
@@ -348,22 +345,22 @@ impl PeerICEConnection {
                     ssl::HandshakeError::Failure(handshake) => {
                         println!("HS failed: {:?}", handshake.error());
                         self.dtls = Some(DTLSState::Failed());
-                        Some(PeerICEConnectionEvent::DtlsInitializeFailed(String::from(format!("{:?}", handshake.error()))))
+                        Some(RTCTransportEvent::DtlsInitializeFailed(String::from(format!("{:?}", handshake.error()))))
                     },
                     ssl::HandshakeError::SetupFailure(error) => {
                         println!("HS setup error: {:?}", error);
                         self.dtls = Some(DTLSState::Failed());
-                        Some(PeerICEConnectionEvent::DtlsInitializeFailed(String::from(format!("{:?}", error))))
+                        Some(RTCTransportEvent::DtlsInitializeFailed(String::from(format!("{:?}", error))))
                     }
                 }
             }
         }
     }
 
-    fn process_incoming_data(&mut self, mut data: Vec<u8>) -> Option<PeerICEConnectionEvent> {
+    fn process_incoming_data(&mut self, mut data: Vec<u8>) -> Option<RTCTransportEvent> {
         #[cfg(feature = "simulated-loss")]
         if rand::random::<u8>() < self.simulated_loss {
-            return Some(PeerICEConnectionEvent::MessageDropped(data));
+            return Some(RTCTransportEvent::MessageDropped(data));
         }
 
         if DtlsStream::is_ssl_packet(&data) {
@@ -373,7 +370,7 @@ impl PeerICEConnection {
                 match srtp.unprotect(data.as_mut_slice()) {
                     Ok(len) => {
                         data.truncate(len);
-                        return Some(PeerICEConnectionEvent::MessageReceivedRtp(data));
+                        return Some(RTCTransportEvent::MessageReceivedRtp(data));
                     },
                     Err(err) => {
                         if err == Srtp2ErrorCode::ReplayFail {
@@ -391,7 +388,7 @@ impl PeerICEConnection {
                 match srtp.unprotect_rtcp(data.as_mut_slice()) {
                     Ok(len) => {
                         data.truncate(len);
-                        return Some(PeerICEConnectionEvent::MessageReceivedRtcp(data));
+                        return Some(RTCTransportEvent::MessageReceivedRtcp(data));
                     },
                     Err(err) => {
                         eprintln!("Failed to unprotect rtcp packet: {:?}", err);
@@ -407,17 +404,17 @@ impl PeerICEConnection {
     }
 }
 
-impl Stream for PeerICEConnection {
-    type Item = PeerICEConnectionEvent;
+impl Stream for RTCTransport {
+    type Item = RTCTransportEvent;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         if !self.local_candidates_gathered {
             if let Poll::Ready(candidate) = self.ice_stream.poll_next_unpin(cx) {
                 return if let Some(ice_candidate) = candidate {
-                    Poll::Ready(Some(PeerICEConnectionEvent::LocalIceCandidate(DebugableCandidate{ inner: ice_candidate })))
+                    Poll::Ready(Some(RTCTransportEvent::LocalIceCandidate(DebugableCandidate{ inner: ice_candidate })))
                 } else {
                     self.local_candidates_gathered = true;
-                    Poll::Ready(Some(PeerICEConnectionEvent::LocalIceGatheringFinished()))
+                    Poll::Ready(Some(RTCTransportEvent::LocalIceGatheringFinished()))
                 }
             }
         }
@@ -435,7 +432,7 @@ impl Stream for PeerICEConnection {
             if ice_state != self.last_ice_state {
                 println!("ICE state change from {:?} to {:?}", self.last_ice_state, ice_state);
                 self.last_ice_state = ice_state;
-                return Poll::Ready(Some(PeerICEConnectionEvent::StreamStateChanged(ice_state)));
+                return Poll::Ready(Some(RTCTransportEvent::StreamStateChanged(ice_state)));
             }
         }
 
@@ -502,7 +499,7 @@ impl Stream for PeerICEConnection {
                             let _ = std::mem::replace(&mut self.dtls, Some(DTLSState::Failed()));
                             println!("DTLS read returned EOF");
                         }
-                        return Poll::Ready(Some(PeerICEConnectionEvent::MessageReceivedDtls(buffer[..read].to_vec())));
+                        return Poll::Ready(Some(RTCTransportEvent::MessageReceivedDtls(buffer[..read].to_vec())));
                     },
                     Err(error) => {
                         match &error.kind() {
@@ -521,7 +518,7 @@ impl Stream for PeerICEConnection {
         while let Poll::Ready(message) = self.control_receiver.poll_next_unpin(cx) {
             let message = message.expect("unexpected control channel end");
             match message {
-                PeerICEConnectionControl::SendMessage(buffer) => {
+                RTCTransportControl::SendMessage(buffer) => {
                     if let Some(DTLSState::Connected(stream)) = &mut self.dtls {
                         /* TODO: better error handling? */
                         stream.write(&buffer)
@@ -530,7 +527,7 @@ impl Stream for PeerICEConnection {
                         println!("Tried to send a dtls message without an active session");
                     }
                 },
-                PeerICEConnectionControl::SendRtpMessage(mut buffer) => {
+                RTCTransportControl::SendRtpMessage(mut buffer) => {
                     if let Some(srtp) = &mut self.srtp {
                         let length = buffer.len();
                         buffer.resize(length + 148, 0xFE);
@@ -548,7 +545,7 @@ impl Stream for PeerICEConnection {
                         eprintln!("tried to send rtp data, but srtp hasn't been initialized yet");
                     }
                 },
-                PeerICEConnectionControl::SendRtcpMessage(mut buffer) => {
+                RTCTransportControl::SendRtcpMessage(mut buffer) => {
                     if let Some(srtp) = &mut self.srtp {
                         let length = buffer.len();
                         buffer.resize(length + 148, 0);

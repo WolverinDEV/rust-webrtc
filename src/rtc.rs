@@ -13,7 +13,7 @@ use std::rc::Rc;
 use std::cell::{RefCell, RefMut};
 use crate::media;
 use std::collections::HashMap;
-use crate::ice::{PeerICEConnection, ICEConnectionInitializeError, ICECredentials, PeerICEConnectionEvent, ICECandidateAddError};
+use crate::transport::{RTCTransport, RTCTransportInitializeError, ICECredentials, RTCTransportEvent, RTCTransportICECandidateAddError};
 use webrtc_sdp::{SdpSession, SdpOrigin, SdpTiming};
 use webrtc_sdp::address::ExplicitlyTypedAddress;
 use std::net::{IpAddr, Ipv4Addr};
@@ -85,7 +85,7 @@ pub struct PeerConnection {
     state: PeerConnectionState,
 
     ice_agent: libnice::ice::Agent,
-    ice_channels: Vec<Rc<RefCell<PeerICEConnection>>>,
+    ice_channels: Vec<Rc<RefCell<RTCTransport>>>,
 
     origin_username: String,
     media_channel: HashMap<MediaId, Arc<Mutex<dyn media::MediaChannel>>>
@@ -103,7 +103,7 @@ pub enum RemoteDescriptionApplyError {
     FailedToAddIceStream{ error: BoolError },
 
     MediaChannelConfigure{ error: String },
-    IceInitializeError{ result: ICEConnectionInitializeError, media_id: MediaId },
+    IceInitializeError{ result: RTCTransportInitializeError, media_id: MediaId },
     MixedIceSetupStates{ },
     IceSetupUnsupported{ media_index: usize }
 }
@@ -328,7 +328,7 @@ impl PeerConnection {
 
     /// Adding a remote ice candidate.
     /// To signal a no more candidates event just add `None`
-    pub fn add_remove_ice_candidate(&mut self, media_fragment: &MediaIdFragment, candidate: Option<&Candidate>) -> Result<(), ICECandidateAddError> {
+    pub fn add_remove_ice_candidate(&mut self, media_fragment: &MediaIdFragment, candidate: Option<&Candidate>) -> Result<(), RTCTransportICECandidateAddError> {
         if let Some(channel) = self.find_ice_channel_by_media_fragment(media_fragment) {
             /* in theory the channel should not be borrowed elsewhere */
             let mut channel = RefCell::borrow_mut(channel);
@@ -339,7 +339,7 @@ impl PeerConnection {
                 channel.add_remote_candidate(candidate)
             }
         } else {
-            Err(ICECandidateAddError::UnknownMediaChannel)
+            Err(RTCTransportICECandidateAddError::UnknownMediaChannel)
         }
     }
 
@@ -357,7 +357,7 @@ impl PeerConnection {
         self.media_channel.iter_mut().map(|e| e.1.clone()).collect()
     }
 
-    fn create_ice_channel(&mut self, credentials: &ICECredentials, media_id: MediaId, setup: SdpAttributeSetup) -> Result<Rc<RefCell<PeerICEConnection>>, RemoteDescriptionApplyError> {
+    fn create_ice_channel(&mut self, credentials: &ICECredentials, media_id: MediaId, setup: SdpAttributeSetup) -> Result<Rc<RefCell<RTCTransport>>, RemoteDescriptionApplyError> {
         if let Some(channel) = self.ice_channels.iter_mut().find(|entry| {
             let entry = RefCell::borrow(entry);
             &entry.remote_credentials == credentials
@@ -373,7 +373,7 @@ impl PeerConnection {
             let stream = libnice::ice::Agent::stream_builder(&mut self.ice_agent, 1).build().map_err(|error| RemoteDescriptionApplyError::FailedToAddIceStream { error })?;
 
             #[allow(unused_mut)]
-            let mut connection = PeerICEConnection::new(stream, credentials.clone(), media_id.clone(), setup)
+            let mut connection = RTCTransport::new(stream, credentials.clone(), media_id.clone(), setup)
                 .map_err(|err| RemoteDescriptionApplyError::IceInitializeError { result: err, media_id: media_id.clone() })?;
 
             /* FIXME! */
@@ -389,11 +389,11 @@ impl PeerConnection {
         }
     }
 
-    fn find_ice_channel_by_media_fragment(&mut self, media_fragment: &MediaIdFragment) -> Option<&Rc<RefCell<PeerICEConnection>>> {
+    fn find_ice_channel_by_media_fragment(&mut self, media_fragment: &MediaIdFragment) -> Option<&Rc<RefCell<RTCTransport>>> {
         self.ice_channels.iter().find(|channel| RefCell::borrow(channel).media_ids.iter().find(|media| media_fragment.matches(media)).is_some())
     }
 
-    fn dispatch_media_event(&self, ice: &mut RefMut<PeerICEConnection>, event: MediaChannelIncomingEvent) {
+    fn dispatch_media_event(&self, ice: &mut RefMut<RTCTransport>, event: MediaChannelIncomingEvent) {
         let mut event = Some(event);
         for stream_id in ice.media_ids.iter() {
             let channel = self.media_channel.get(stream_id)
@@ -408,23 +408,23 @@ impl PeerConnection {
         }
     }
 
-    fn handle_ice_event(&mut self, ice: &mut RefMut<PeerICEConnection>, event: PeerICEConnectionEvent) -> Option<PeerConnectionEvent> {
+    fn handle_ice_event(&mut self, ice: &mut RefMut<RTCTransport>, event: RTCTransportEvent) -> Option<PeerConnectionEvent> {
         match event {
-            PeerICEConnectionEvent::LocalIceCandidate(candidate) => {
+            RTCTransportEvent::LocalIceCandidate(candidate) => {
                 return Some(PeerConnectionEvent::LocalIceCandidate(Some(candidate.into()), ice.owning_media_id.clone()));
             },
-            PeerICEConnectionEvent::LocalIceGatheringFinished() => {
+            RTCTransportEvent::LocalIceGatheringFinished() => {
                 return Some(PeerConnectionEvent::LocalIceCandidate(None, ice.owning_media_id.clone()));
             },
-            PeerICEConnectionEvent::DtlsInitialized() => {
+            RTCTransportEvent::DtlsInitialized() => {
                 self.dispatch_media_event(ice, MediaChannelIncomingEvent::TransportInitialized);
                 None
             },
-            PeerICEConnectionEvent::MessageReceivedDtls(message) => {
+            RTCTransportEvent::MessageReceivedDtls(message) => {
                 self.dispatch_media_event(ice, MediaChannelIncomingEvent::DtlsDataReceived(message));
                 None
             },
-            PeerICEConnectionEvent::MessageReceivedRtcp(message) => {
+            RTCTransportEvent::MessageReceivedRtcp(message) => {
                 let mut packets = [&[0u8][..]; 128];
                 let packet_count = RtcpPacket::split_up_packets(message.as_slice(), &mut packets[..]);
                 if let Err(error) = packet_count {
@@ -465,7 +465,7 @@ impl PeerConnection {
                 }
                 None
             },
-            PeerICEConnectionEvent::MessageReceivedRtp(message) => {
+            RTCTransportEvent::MessageReceivedRtp(message) => {
                 match ParsedRtpPacket::new(message) {
                     Ok(reader) => {
                         self.dispatch_media_event(ice, MediaChannelIncomingEvent::RtpPacketReceived(reader));
@@ -476,7 +476,7 @@ impl PeerConnection {
                 }
                 None
             },
-            PeerICEConnectionEvent::MessageDropped(message) => {
+            RTCTransportEvent::MessageDropped(message) => {
                 println!("Dropping received ICE message of length {}", message.len());
                 None
             },

@@ -3,7 +3,7 @@
 use tokio::sync::mpsc;
 use crate::rtc::{MediaId, ACT_PASS_DEFAULT_SETUP_TYPE};
 use webrtc_sdp::media_type::{SdpMedia, SdpMediaLine, SdpMediaValue, SdpFormatList, SdpProtocolValue};
-use crate::ice::{PeerICEConnectionControl};
+use crate::transport::{RTCTransportControl};
 use webrtc_sdp::attribute_type::{SdpAttribute, SdpAttributeSetup, SdpAttributeSctpmap, SdpAttributeType};
 use webrtc_sdp::SdpConnection;
 use webrtc_sdp::address::ExplicitlyTypedAddress;
@@ -69,7 +69,7 @@ pub struct MediaChannelApplication {
     pending_stream_resets: Vec<u16>,
 
     dtls_role_client: bool,
-    ice_control: mpsc::UnboundedSender<PeerICEConnectionControl>,
+    ice_control: mpsc::UnboundedSender<RTCTransportControl>,
 
     internal_channels: BTreeMap<u16, Rc<RefCell<InternalDataChannel>>>,
     channels: VecDeque<DataChannel>,
@@ -80,7 +80,7 @@ pub struct MediaChannelApplication {
 }
 
 impl MediaChannelApplication {
-    pub fn new(media_id: MediaId, ice_control: mpsc::UnboundedSender<PeerICEConnectionControl>) -> Option<Self> {
+    pub fn new(media_id: MediaId, ice_control: mpsc::UnboundedSender<RTCTransportControl>) -> Option<Self> {
         let stream = Rc::new(RefCell::new(SctpStreamInner {
             read_queue: VecDeque::new(),
             read_index: 0,
@@ -575,7 +575,7 @@ impl Stream for MediaChannelApplication {
 
         /* write all pending packets */
         while let Some(buffer) = RefCell::borrow_mut(&self.stream).write_queue.pop_front() {
-            if let Err(err) = self.ice_control.send(PeerICEConnectionControl::SendMessage(buffer)) {
+            if let Err(err) = self.ice_control.send(RTCTransportControl::SendMessage(buffer)) {
                 eprintln!("failed to send sctp data to ice: {}", err);
             }
         }

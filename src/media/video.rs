@@ -1,7 +1,7 @@
 use crate::media::rtp_based::MediaChannelRtpBased;
 use std::ops::{Deref, DerefMut};
 use crate::rtc::MediaId;
-use crate::ice::{PeerICEConnectionControl};
+use crate::transport::{RTCTransportControl};
 use tokio::sync::mpsc;
 use crate::media::{MediaChannel, TypedMediaChannel, MediaChannelIncomingEvent};
 use webrtc_sdp::media_type::{SdpMedia, SdpMediaValue};
@@ -13,7 +13,7 @@ pub struct MediaChannelVideo {
 }
 
 impl MediaChannelVideo {
-    pub fn new(media_id: MediaId, ice_control: mpsc::UnboundedSender<PeerICEConnectionControl>) -> Self {
+    pub fn new(media_id: MediaId, ice_control: mpsc::UnboundedSender<RTCTransportControl>) -> Self {
         MediaChannelVideo {
             base: MediaChannelRtpBased::new(SdpMediaValue::Video, media_id, ice_control)
         }

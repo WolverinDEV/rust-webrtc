@@ -5,7 +5,7 @@ use crate::srtp2::srtp2_global_init;
 
 pub mod rtc;
 pub mod media;
-pub mod ice;
+pub mod transport;
 pub mod sctp;
 pub mod srtp2;
 pub mod utils;
