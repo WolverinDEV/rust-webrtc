@@ -247,4 +247,10 @@ impl RtcpPacket {
         }?;
         Ok(writer.position() as usize)
     }
+
+    pub fn to_vec(&self) -> Result<Vec<u8>> {
+        let mut buffer = [0u8; 2048];
+        let write_result = self.write(&mut buffer)?;
+        Ok(buffer[0..write_result].to_vec())
+    }
 }

@@ -1,69 +1,53 @@
-use crate::media::application::MediaChannelApplication;
-use crate::rtc::MediaId;
-use webrtc_sdp::media_type::SdpMedia;
-use crate::media::audio::{MediaChannelAudio};
-use crate::media::video::MediaChannelVideo;
+use crate::application::ChannelApplication;
 use std::collections::HashMap;
 use webrtc_sdp::attribute_type::{SdpAttributeType, SdpAttribute, SdpAttributeSsrc, SdpAttributeRtcpFbType, SdpAttributeFmtpParameters, SdpAttributeRtpmap, SdpAttributePayloadType, SdpAttributeRtcpFb, SdpAttributeFmtp};
 use std::fmt::{Formatter, Debug};
 use webrtc_sdp::error::SdpParserInternalError;
 use crate::utils::rtp::ParsedRtpPacket;
 use crate::utils::rtcp::RtcpPacket;
+use webrtc_sdp::media_type::SdpMedia;
 
-pub mod application;
-pub mod rtp_based;
-pub mod audio;
-pub mod video;
+mod media_line;
+pub use media_line::*;
 
-pub enum TypedMediaChannel<'a> {
-    Application(&'a mut MediaChannelApplication),
-    Audio(&'a mut MediaChannelAudio),
-    Video(&'a mut MediaChannelVideo),
-}
+mod receiver;
+pub use receiver::*;
 
-pub enum MediaChannelIncomingEvent {
-    TransportInitialized,
-    DtlsDataReceived(Vec<u8>),
-    RtpPacketReceived(ParsedRtpPacket),
-    RtcpPacketReceived(RtcpPacket)
-}
+mod sender;
+pub use sender::*;
+use tokio::sync::mpsc;
+use crate::transport::RTCTransportControl;
+use std::io::Error;
 
-pub trait MediaChannel {
-    fn as_typed(&mut self) -> TypedMediaChannel;
-
-    fn media_id(&self) -> &MediaId;
-
-    fn configure(&mut self, media: &SdpMedia) -> Result<(), String>;
-    fn generate_sdp(&self) -> Result<SdpMedia, String>;
-
-    fn process_peer_event(&mut self, event: &mut Option<MediaChannelIncomingEvent>);
+pub enum ControlDataSendError {
+    BuildFailed(Error),
+    SendFailed
 }
 
 #[derive(Debug)]
-pub struct MediaSource {
-    id: u32,
-    properties: HashMap<String, Option<String>>
+pub(crate) struct InternalMediaTrack {
+    pub id: u32,
+    pub media_line: u32,
+    pub properties: HashMap<String, Option<String>>,
+
+    pub transport_id: u32,
+    pub transport: mpsc::UnboundedSender<RTCTransportControl>,
 }
 
-impl MediaSource {
-    fn parse_sdp(id: u32, media: &SdpMedia) -> Self {
-        let mut result = MediaSource{
-            id,
-            properties: HashMap::new()
-        };
-
-        media.get_attributes_of_type(SdpAttributeType::Ssrc)
+impl InternalMediaTrack {
+    pub fn parse_properties_from_sdp(&mut self, media: &SdpMedia) {
+        /* TODO: Test if the properties have changed */
+        let id = self.id;
+        self.properties.clear();
+        for attribute in media.get_attributes_of_type(SdpAttributeType::Ssrc)
             .iter()
             .map(|e| if let SdpAttribute::Ssrc(data) = e { data } else { panic!() })
-            .filter(|e| e.id == id && e.attribute.is_some())
-            .for_each(|attr| {
-                result.properties.insert(attr.attribute.as_ref().unwrap().clone(), attr.value.clone());
-            });
-
-        result
+            .filter(|e| e.id == id && e.attribute.is_some()) {
+            self.properties.insert(attribute.attribute.as_ref().unwrap().clone(), attribute.value.clone());
+        }
     }
 
-    fn write_sdp(&self, media: &mut SdpMedia) {
+    pub fn write_sdp(&self, media: &mut SdpMedia) {
         if self.properties.is_empty() {
             media.add_attribute(SdpAttribute::Ssrc(SdpAttributeSsrc {
                 id: self.id,
@@ -79,18 +63,6 @@ impl MediaSource {
                 })).expect("failed to add ssrc");
             }
         }
-    }
-
-    pub fn properties(&self) -> &HashMap<String, Option<String>> {
-        &self.properties
-    }
-
-    pub fn properties_mut(&mut self) -> &mut HashMap<String, Option<String>> {
-        &mut self.properties
-    }
-
-    pub fn id(&self) -> u32 {
-        self.id
     }
 }
 
@@ -120,7 +92,7 @@ pub struct Codec {
     pub channels: Option<u32>,
 
     pub parameters: Option<SdpAttributeFmtpParameters>,
-    pub feedback: Option<CodecFeedback>
+    pub feedback: Vec<CodecFeedback>
 }
 
 impl Debug for Codec {
@@ -137,7 +109,7 @@ impl Debug for Codec {
 }
 
 impl Codec {
-    fn append_to_sdp(&self, target: &mut SdpMedia) -> Result<(), SdpParserInternalError> {
+    pub(crate) fn append_to_sdp(&self, target: &mut SdpMedia) -> Result<(), SdpParserInternalError> {
         target.add_attribute(SdpAttribute::Rtpmap(SdpAttributeRtpmap{
             channels: self.channels.clone(),
             codec_name: self.codec_name.clone(),
@@ -152,7 +124,7 @@ impl Codec {
             }))?;
         }
 
-        if let Some(feedback) = &self.feedback {
+        for feedback in self.feedback.iter() {
             target.add_attribute(SdpAttribute::Rtcpfb(SdpAttributeRtcpFb{
                 payload_type: SdpAttributePayloadType::PayloadType(self.payload_type),
                 extra: feedback.extra.clone(),
@@ -180,16 +152,15 @@ impl Codec {
             frequency: map.frequency,
             codec_name: map.codec_name.clone(),
             channels: map.channels.clone(),
-            feedback: None,
+            feedback: Vec::new(),
             parameters: None
         };
 
-        let feedback = sdp.get_attributes_of_type(SdpAttributeType::Rtcpfb)
+        for feedback in sdp.get_attributes_of_type(SdpAttributeType::Rtcpfb)
             .iter()
             .map(|e| if let SdpAttribute::Rtcpfb(map) = e { map } else { panic!() })
-            .find(|e| if let SdpAttributePayloadType::PayloadType(payload) = e.payload_type { payload == payload_type } else { true });
-        if let Some(feedback) = feedback {
-            codec.feedback = Some(CodecFeedback{
+            .filter(|e| if let SdpAttributePayloadType::PayloadType(payload) = e.payload_type { payload == payload_type } else { true }) {
+            codec.feedback.push(CodecFeedback{
                 feedback_type: feedback.feedback_type.clone(),
                 parameter: feedback.parameter.clone(),
                 extra: feedback.extra.clone()

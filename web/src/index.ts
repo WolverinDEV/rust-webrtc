@@ -12,7 +12,6 @@ interface WebCommand {
     },
     RtcAddIceCandidate: {
         media_index: number,
-        media_id: string,
         candidate: string | undefined
     },
     RtcFinishedIceCandidates: {}
@@ -42,7 +41,6 @@ function handleMessage(data: any) {
             if(!peer) { throw "Missing peer"; }
             peer.addIceCandidate(new RTCIceCandidate({
                 candidate: payload.candidate,
-                sdpMid: payload.media_id,
                 sdpMLineIndex: payload.media_index
             })).catch(error => console.error("[ICE] Failed to add candidate (%o)", error));
             break;
@@ -56,7 +54,7 @@ function handleMessage(data: any) {
             let sdp = payload.sdp.replace("\r\n\r\n", "\r\n");
             console.log("[SDP] Answer:\n%s", sdp);
             peer.setRemoteDescription(new RTCSessionDescription({
-                sdp: sdp,
+                sdp: sdp.replace(/\r?\n\r?\n/g, "\n"),
                 type: "answer"
             })).catch(error => {
                 console.error("Failed to apply answer: %o", error);
@@ -151,6 +149,27 @@ async function initializePeerVideo(peer: RTCPeerConnection) {
     showVideoStream(stream);
 
     setTimeout(() => {
+        console.log("Removing sender");
+        peer.removeTrack(sender);
+
+        setTimeout(() => {
+            peer.addTrack(stream.getVideoTracks()[0]);
+
+            setTimeout(() => {
+                let sender = peer.addTrack(stream.getVideoTracks()[0].clone());
+
+                setTimeout(() => {
+                    peer.removeTrack(sender);
+
+                    setTimeout(() => {
+                        let sender = peer.addTrack(stream.getVideoTracks()[0].clone());
+                    }, 5000);
+                }, 5000);
+            }, 5000);
+        }, 5000);
+    }, 5000);
+    /*
+    setTimeout(() => {
         const clone = stream.getVideoTracks()[0].clone();
         peer.addTrack(clone);
         setTimeout(async () => {
@@ -169,6 +188,7 @@ async function initializePeerVideo(peer: RTCPeerConnection) {
             }, 5000);
         }, 5000);
     }, 5000);
+    */
     //audioContext.createMediaStreamSource(microphoneStream).connect(audioContext.destination);
 }
 
@@ -189,7 +209,6 @@ async function initializePeer() {
         console.log("[ICE] Found local ICE candidate: %o", event.candidate);
         if(event.candidate?.candidate) {
             sendCommand("RtcAddIceCandidate", {
-                media_id: event.candidate.sdpMid,
                 media_index: event.candidate.sdpMLineIndex,
                 candidate: event.candidate.candidate
             });
@@ -236,22 +255,7 @@ async function initializePeer() {
         }
     };
 
-    peer.onnegotiationneeded = async () => {
-        console.error("Nego needed");
-
-        let offer = await peer.createOffer({
-            offerToReceiveAudio: kEnableAudio,
-            offerToReceiveVideo: kEnableVideo
-        });
-        console.error("New offer:\n%s", (await peer.createOffer()).sdp);
-        await peer.setLocalDescription(offer);
-
-        console.log("[SDP] Offer:\n%s", offer.sdp);
-        sendCommand("RtcSetRemoteDescription", { sdp: offer.sdp, mode: "offer" });
-        console.error(offer);
-    }
-
-    //await initializePeerApplication(peer);
+    await initializePeerApplication(peer);
 
     const kEnableAudio = false;
     if(kEnableAudio) {
@@ -263,7 +267,6 @@ async function initializePeer() {
         await initializePeerVideo(peer);
     }
 
-    return;
     const offer = await peer.createOffer({
         offerToReceiveAudio: kEnableAudio,
         offerToReceiveVideo: kEnableVideo
@@ -273,6 +276,21 @@ async function initializePeer() {
     console.log("[SDP] Offer:\n%s", offer.sdp);
     sendCommand("RtcSetRemoteDescription", { sdp: offer.sdp, mode: "offer" });
     console.error(offer);
+
+    /* if something changes, signal it to the remote */
+    peer.onnegotiationneeded = async () => {
+        console.error("Nego needed");
+
+        let offer = await peer.createOffer({
+            offerToReceiveAudio: kEnableAudio,
+            offerToReceiveVideo: kEnableVideo
+        });
+        await peer.setLocalDescription(offer);
+
+        console.log("[SDP] Offer:\n%s", offer.sdp);
+        sendCommand("RtcSetRemoteDescription", { sdp: offer.sdp, mode: "offer" });
+        console.error(offer);
+    }
 }
 
 async function main() {

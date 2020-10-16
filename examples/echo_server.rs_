@@ -18,7 +18,7 @@ use web_test::media::application::{MediaChannelApplication, MediaChannelApplicat
 use web_test::sctp::message::DataChannelType;
 use web_test::media::audio::MediaChannelAudio;
 use web_test::media::video::{MediaChannelVideo, MediaChannelVideoEvents};
-use web_test::rtc::{PeerConnection, PeerConnectionEvent, RtcDescriptionType, MediaIdFragment};
+use web_test::rtc::{PeerConnection, PeerConnectionEvent, RtcDescriptionType};
 use web_test::media::{TypedMediaChannel, MediaChannel};
 use crate::shared::gio::MAIN_GIO_EVENT_LOOP;
 use crate::shared::ws::{WebCommand, Client, ClientEvents};
@@ -355,7 +355,7 @@ fn handle_command(client: &mut Client<ClientData>, command: &WebCommand) -> std:
                 configure_media_channel(channel.lock().unwrap().deref_mut())?;
             }
 
-            let answer = locked_peer.create_answer().map_err(|err| format!("{:?}", err))?;
+            let answer = locked_peer.create_local_description().map_err(|err| format!("{:?}", err))?;
             println!("Answer: {:?}", answer.to_string());
             let _ = client.data.command_pipe.0.send(WebCommand::RtcSetRemoteDescription { sdp: answer.to_string(), mode: String::from("answer") });
         },
@@ -366,7 +366,7 @@ fn handle_command(client: &mut Client<ClientData>, command: &WebCommand) -> std:
             let candidate = { if let SdpAttribute::Candidate(c) = candidate { Ok(c) } else { Err(String::from("internal candidate cast error")) } }?;
 
             let mut peer = peer.lock().unwrap();
-            let _ = peer.add_remove_ice_candidate(&MediaIdFragment::Full((*media_index as usize, media_id.clone())), Some(&candidate)).map_err(|err| format!("{:?}", err))
+            let _ = peer.add_remote_ice_candidate(&MediaLineFragment::Full((*media_index as usize, media_id.clone())), Some(&candidate)).map_err(|err| format!("{:?}", err))
                 .map_err(|err| println!("Failed to add remote ice candidate: {:?}", err));
 
         },

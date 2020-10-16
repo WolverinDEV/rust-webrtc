@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use glib::{MainContext, BoolError};
-use webrtc_sdp::media_type::{SdpMediaValue};
+use webrtc_sdp::media_type::{SdpMediaValue, SdpMedia};
 use std::sync::{Arc, Mutex};
 use webrtc_sdp::attribute_type::{SdpAttributeType, SdpAttribute, SdpAttributeSetup, SdpAttributeGroup, SdpAttributeGroupSemantic};
 use std::fmt::Debug;
@@ -12,57 +12,34 @@ use tokio::macros::support::Pin;
 use std::rc::Rc;
 use std::cell::{RefCell, RefMut};
 use crate::media;
-use std::collections::HashMap;
+use std::collections::{HashMap, BTreeMap, VecDeque};
 use crate::transport::{RTCTransport, RTCTransportInitializeError, ICECredentials, RTCTransportEvent, RTCTransportICECandidateAddError};
-use webrtc_sdp::{SdpSession, SdpOrigin, SdpTiming};
+use webrtc_sdp::{SdpSession, SdpOrigin, SdpTiming, SdpConnection};
 use webrtc_sdp::address::ExplicitlyTypedAddress;
 use std::net::{IpAddr, Ipv4Addr};
 use libnice::ffi::{NiceCompatibility, NiceAgentProperty};
 use libnice::sys::NiceAgentOption_NICE_AGENT_OPTION_ICE_TRICKLE;
-use crate::media::application::MediaChannelApplication;
-use crate::media::audio::MediaChannelAudio;
-use crate::media::video::MediaChannelVideo;
-use crate::media::MediaChannelIncomingEvent;
+use crate::application::{ChannelApplication, DataChannel, ApplicationChannelEvent};
+use crate::media::{MediaLine, MediaLineParseError, InternalMediaReceiver, MediaReceiverEvent, MediaReceiver, InternalMediaSender, InternalMediaTrack, MediaSender};
 use crate::utils::rtp::ParsedRtpPacket;
 use crate::utils::rtcp::RtcpPacket;
+use std::ops::{DerefMut, Deref};
+use tokio::sync::mpsc;
+use crate::utils::RtpPacketResendRequester;
+use crate::sctp::message::DataChannelType;
 
 /// The default setup type if the remote peer offers active and passive setup
 /// Allowed values are only `SdpAttributeSetup::Passive` and `SdpAttributeSetup::Active`
 pub const ACT_PASS_DEFAULT_SETUP_TYPE: SdpAttributeSetup = SdpAttributeSetup::Passive;
 
-/// The first element contains the media line index.
-/// The second element contains the media identifier
-pub type MediaId = (usize, String);
-
-pub enum MediaIdFragment {
-    /// Only the media line index is known
-    LineIndex(usize),
-
-    /// Only the media identifier is known
-    Identifier(String),
-
-    /// The full media id is known
-    Full(MediaId)
-}
-
-impl MediaIdFragment {
-    fn matches(&self, target: &MediaId) -> bool {
-        match self {
-            MediaIdFragment::Full(media) => {
-                target == media
-            },
-            MediaIdFragment::Identifier(identifier) => {
-                &target.1 == identifier
-            },
-            MediaIdFragment::LineIndex(index) => {
-                &target.0 == index
-            }
-        }
-    }
-}
-
 pub enum PeerConnectionEvent {
-    LocalIceCandidate(Option<Candidate>, MediaId)
+    LocalIceCandidate(Option<Candidate>, u32),
+    ReceivedRemoteStream(MediaReceiver),
+
+    ReceivedDataChannel(DataChannel),
+
+    UnassignableRtcpPacket(RtcpPacket),
+    UnassignableRtpPacket(ParsedRtpPacket),
 }
 
 #[derive(Debug, PartialOrd, PartialEq, Clone)]
@@ -85,10 +62,21 @@ pub struct PeerConnection {
     state: PeerConnectionState,
 
     ice_agent: libnice::ice::Agent,
-    ice_channels: Vec<Rc<RefCell<RTCTransport>>>,
+    transport: BTreeMap<u32, Rc<RefCell<RTCTransport>>>,
+    media_lines: Vec<Rc<RefCell<MediaLine>>>,
+
+    stream_receiver: BTreeMap<u32, Rc<RefCell<InternalMediaReceiver>>>,
+    stream_sender: BTreeMap<u32, Rc<RefCell<InternalMediaSender>>>,
+
+    application_channel: Box<ChannelApplication>,
 
     origin_username: String,
-    media_channel: HashMap<MediaId, Arc<Mutex<dyn media::MediaChannel>>>
+
+    /*
+     * TODO: Does this really needs to be a unbound server/receiver or could we better use something else?
+     * DeVec for example (but what's about memory growth?)
+     */
+    local_events: (mpsc::UnboundedSender<PeerConnectionEvent>, mpsc::UnboundedReceiver<PeerConnectionEvent>)
 }
 
 #[derive(Debug)]
@@ -98,19 +86,29 @@ pub enum RemoteDescriptionApplyError {
     InvalidSdp{ reason: String },
     InternalError{ detail: String },
 
+    /// The remote description contains less media lines than
+    /// we're expecting
+    MissingMediaLines,
+
     DuplicatedApplicationChannel,
     MissingAttribute{ media_index: usize, attribute: String },
     FailedToAddIceStream{ error: BoolError },
 
+    MediaLineParseError{ media_line: u32, error: MediaLineParseError },
+
     MediaChannelConfigure{ error: String },
-    IceInitializeError{ result: RTCTransportInitializeError, media_id: MediaId },
+    IceInitializeError{ result: RTCTransportInitializeError, media_id: u32 },
     MixedIceSetupStates{ },
     IceSetupUnsupported{ media_index: usize }
 }
 
 #[derive(Debug)]
 pub enum CreateAnswerError {
-    MediaLineError{ error: String, media_id: MediaId }
+    MediaLineError{ error: String, media_id: u32 },
+    DescribeError(u32),
+
+    MissingTransportChannel(u32),
+    InternalError(String)
 }
 
 macro_rules! get_attribute_value {
@@ -177,9 +175,15 @@ impl PeerConnection {
             origin_username: String::from("-"),
 
             ice_agent: libnice::ice::Agent::new_full(event_loop, NiceCompatibility::RFC5245, NiceAgentOption_NICE_AGENT_OPTION_ICE_TRICKLE),
-            ice_channels: Vec::with_capacity(8),
+            transport: BTreeMap::new(),
 
-            media_channel: HashMap::default()
+            stream_receiver: BTreeMap::new(),
+            stream_sender: BTreeMap::new(),
+
+            application_channel: Box::new(ChannelApplication::new().expect("failed to allocate new application channel")),
+
+            media_lines: Vec::new(),
+            local_events: mpsc::unbounded_channel()
         };
 
         connection.ice_agent.get_ffi_agent().on_selected_pair(|_, _, _, _| println!("Candidate pair has been found")).unwrap();
@@ -196,95 +200,164 @@ impl PeerConnection {
         connection
     }
 
-    pub fn set_remote_description(&mut self, session: &webrtc_sdp::SdpSession, mode: RtcDescriptionType) -> Result<(), RemoteDescriptionApplyError> {
+    pub fn media_lines(&self) -> &Vec<Rc<RefCell<MediaLine>>> {
+        &self.media_lines
+    }
+
+    pub fn set_remote_description(&mut self, description: &webrtc_sdp::SdpSession, mode: RtcDescriptionType) -> Result<(), RemoteDescriptionApplyError> {
         if mode != RtcDescriptionType::Offer {
             return Err(RemoteDescriptionApplyError::UnsupportedMode);
         }
+        if self.media_lines.len() > description.media.len() {
+            return Err(RemoteDescriptionApplyError::MissingMediaLines);
+        }
 
         /* copy the origin username and send it back, required for mozilla for example */
-        self.origin_username = session.origin.username.clone();
+        self.origin_username = description.origin.username.clone();
 
-        /* TODO: Proper reset everything? */
-        self.media_channel.clear();
-        self.ice_channels.clear();
-
-        println!("Desk: {:}", session);
-        for media_index in 0..session.media.len() {
-            let media = &session.media[media_index as usize];
-            let media_id: MediaId = (media_index, get_attribute_value!(media, media_index, Mid)?.clone());
+        println!("Desk: {:}", description);
+        for media_line in 0..description.media.len() {
+            let media = &description.media[media_line as usize];
 
             let credentials = ICECredentials {
-                username: get_attribute_value!(media, media_index, IceUfrag)?.clone(),
-                password: get_attribute_value!(media, media_index, IcePwd)?.clone()
+                username: get_attribute_value!(media, media_line, IceUfrag)?.clone(),
+                password: get_attribute_value!(media, media_line, IcePwd)?.clone()
             };
 
-            println!("Remote credentials: {:?}", &credentials);
-            let setup = get_attribute_value!(media, media_index, Setup)?;
+            let setup = get_attribute_value!(media, media_line, Setup)?;
             let local_setup = {
                 match setup {
                     SdpAttributeSetup::Passive => Ok(SdpAttributeSetup::Active),
                     SdpAttributeSetup::Active => Ok(SdpAttributeSetup::Passive),
                     SdpAttributeSetup::Actpass => Ok(ACT_PASS_DEFAULT_SETUP_TYPE),
-                    _ => Err(RemoteDescriptionApplyError::IceSetupUnsupported { media_index })
+                    _ => Err(RemoteDescriptionApplyError::IceSetupUnsupported { media_index: media_line })
                 }
             }?;
 
-            let ice_channel = self.create_ice_channel(&credentials, media_id.clone(), local_setup)?;
+            /* TODO: Don't (may) create a channel here if we already know the media line */
+            let ice_channel = self.create_ice_channel(&credentials, media_line as u32, local_setup)?;
             let mut ice_channel_mut = RefCell::borrow_mut(&ice_channel);
+            if let Some(line) = self.media_lines.get(media_line) {
+                /* we've to update the line */
+                let line = line.clone();
+                let mut line = RefCell::borrow_mut(&line);
 
-            if ice_channel_mut.owning_media_id.0 == media_index {
-                /* yeahr it's our channel */
-                for candidate in media.get_attributes_of_type(SdpAttributeType::Candidate)
-                    .iter()
-                    .map(|attribute| if let SdpAttribute::Candidate(c) = attribute { c } else { panic!("expected a candidate") }) {
+                line.update_from_sdp(media)
+                    .map_err(|err| RemoteDescriptionApplyError::MediaLineParseError { media_line: media_line as u32, error: err })?;
 
-                    ice_channel_mut.add_remote_candidate(Some(candidate))
-                        .map_err(|err| RemoteDescriptionApplyError::InternalError { detail: String::from(format!("failed to add candidate: {:?}", err)) })?;
+                if line.media_type == SdpMediaValue::Application {
+                    self.application_channel.set_remote_description(media)
+                        .map_err(|err| RemoteDescriptionApplyError::MediaChannelConfigure { error: err })?;
                 }
 
-                /* /* Firefox does not sends this stuff */
-                let is_trickle = media.get_attribute(SdpAttributeType::IceOptions)
-                    .map(|attribute| if let SdpAttribute::IceOptions(opts) = attribute { opts } else { panic!("expected a ice options") })
-                    .map_or(false, |attributes| attributes.iter().find(|attribute| attribute.as_str() == "trickle").is_some());
-                if media.get_attribute(SdpAttributeType::EndOfCandidates).is_some() {
-                    if is_trickle {
-                        return Err(RemoteDescriptionApplyError::InvalidSdp { reason: String::from("found end-of-candidates but the ice mode is expected to be trickle") });
+                /* TODO: Validate ICE */
+                self.update_media_line_streams(media, line.deref_mut(), ice_channel_mut.deref_mut());
+            } else {
+                let mut line = MediaLine::new_from_sdp(media_line as u32, media)
+                    .map_err(|err| RemoteDescriptionApplyError::MediaLineParseError { media_line: media_line as u32, error: err })?;
+
+                /* yeah we have a new line */
+                println!("Remote credentials: {:?}", &credentials);
+
+                if ice_channel_mut.owning_media_line == media_line as u32 {
+                    /* yeah it's our channel */
+                    for candidate in media.get_attributes_of_type(SdpAttributeType::Candidate)
+                        .iter()
+                        .map(|attribute| if let SdpAttribute::Candidate(c) = attribute { c } else { panic!("expected a candidate") }) {
+
+                        ice_channel_mut.add_remote_candidate(Some(candidate))
+                            .map_err(|err| RemoteDescriptionApplyError::InternalError { detail: String::from(format!("failed to add candidate: {:?}", err)) })?;
                     }
-                } else {
-                    if !is_trickle {
-                        return Err(RemoteDescriptionApplyError::InvalidSdp { reason: String::from("missing end-of-candidates but the ice mode is trickle") });
+
+                    /*
+                    /* Firefox does not sends this stuff */
+                    let is_trickle = media.get_attribute(SdpAttributeType::IceOptions)
+                        .map(|attribute| if let SdpAttribute::IceOptions(opts) = attribute { opts } else { panic!("expected a ice options") })
+                        .map_or(false, |attributes| attributes.iter().find(|attribute| attribute.as_str() == "trickle").is_some());
+                    if media.get_attribute(SdpAttributeType::EndOfCandidates).is_some() {
+                        if is_trickle {
+                            return Err(RemoteDescriptionApplyError::InvalidSdp { reason: String::from("found end-of-candidates but the ice mode is expected to be trickle") });
+                        }
+                    } else {
+                        if !is_trickle {
+                            return Err(RemoteDescriptionApplyError::InvalidSdp { reason: String::from("missing end-of-candidates but the ice mode is trickle") });
+                        }
                     }
+                    */
                 }
-                */
+
+                line.transport_id = ice_channel_mut.transport_id;
+                ice_channel_mut.media_lines.push(line.index);
+
+                if line.media_type == SdpMediaValue::Application {
+                    self.application_channel.set_remote_description(media);
+                    self.application_channel.transport = Some(ice_channel_mut.control_sender.clone());
+                    /* TODO: Trigger the handle_transport_initialized event if the transport has already been initialized */
+                    //self.application_channel.handle_transport_initialized();
+                }
+
+                self.update_media_line_streams(media, &mut line, ice_channel_mut.deref_mut());
+                self.media_lines.push(Rc::new(RefCell::new(line)));
             }
-            ice_channel_mut.register_media_channel(&media_id);
-
-            let channel = match *media.get_type() {
-                SdpMediaValue::Application => {
-                    let channel = MediaChannelApplication::new(media_id.clone(), ice_channel_mut.control_sender.clone());
-                    if channel.is_none() {
-                        return Err(RemoteDescriptionApplyError::InternalError { detail: String::from("failed to create a new media channel application") });
-                    }
-                    Ok(Arc::new(Mutex::new(channel.unwrap())) as Arc<Mutex<dyn media::MediaChannel>>)
-                },
-                SdpMediaValue::Audio => {
-                    Ok(Arc::new(Mutex::new(MediaChannelAudio::new(media_id.clone(), ice_channel_mut.control_sender.clone()))) as Arc<Mutex<dyn media::MediaChannel>>)
-                },
-                SdpMediaValue::Video => {
-                    Ok(Arc::new(Mutex::new(MediaChannelVideo::new(media_id.clone(), ice_channel_mut.control_sender.clone()))) as Arc<Mutex<dyn media::MediaChannel>>)
-                },
-            }?;
-
-            channel.lock().unwrap().configure(media)
-                .map_err(|err| RemoteDescriptionApplyError::MediaChannelConfigure{ error: err })?;
-
-            self.media_channel.insert(media_id, channel);
         }
 
         Ok(())
     }
 
-    pub fn create_answer(&mut self) -> Result<SdpSession, CreateAnswerError> {
+    fn update_media_line_streams(&mut self, media: &SdpMedia, media_line: &mut MediaLine, transport: &mut RTCTransport) {
+        let current_streams = self.stream_receiver.values()
+            .filter(|receiver| RefCell::borrow(receiver).track.media_line == media_line.index)
+            .map(|receiver| receiver.clone())
+            .collect::<Vec<Rc<RefCell<InternalMediaReceiver>>>>();
+
+        for receiver in current_streams.iter() {
+            let receiver = RefCell::borrow(receiver);
+            if !media_line.remote_streams.contains(&receiver.track.id) {
+                self.stream_receiver.remove(&receiver.track.id);
+            }
+        }
+
+        for receiver_id in media_line.remote_streams.iter() {
+            if self.stream_receiver.contains_key(&receiver_id) {
+                /* TODO: Check if codec or formats have changed! */
+                continue;
+            }
+
+            println!("RTP Stream got new {} on {}", receiver_id, media_line.index);
+            let (tx, rx) = mpsc::unbounded_channel();
+
+            let (ctx, crx) = mpsc::unbounded_channel();
+            let mut internal_receiver = InternalMediaReceiver {
+                track: InternalMediaTrack {
+                    id: *receiver_id,
+                    media_line: media_line.index,
+                    properties: HashMap::new(),
+
+                    transport_id: media_line.transport_id,
+                    transport: transport.control_sender.clone(),
+                },
+
+                event_sender: tx,
+                control_receiver: crx,
+
+                resend_requester: RtpPacketResendRequester::new(),
+            };
+            internal_receiver.track.parse_properties_from_sdp(media);
+
+            let mut receiver = MediaReceiver {
+                id: *receiver_id,
+                media_line: media_line.index,
+
+                events: rx,
+                control: ctx
+            };
+
+            let _ = self.local_events.0.send(PeerConnectionEvent::ReceivedRemoteStream(receiver));
+            self.stream_receiver.insert(*receiver_id, Rc::new(RefCell::new(internal_receiver)));
+        }
+    }
+
+    pub fn create_local_description(&mut self) -> Result<SdpSession, CreateAnswerError> {
         let mut answer = SdpSession::new(0, SdpOrigin {
             session_id: rand::random(),
             session_version: 2,
@@ -296,24 +369,38 @@ impl PeerConnection {
         /* Bundle out media streams */
         answer.add_attribute(SdpAttribute::Group(SdpAttributeGroup{
             semantics: SdpAttributeGroupSemantic::Bundle,
-            tags: self.media_channel.keys().into_iter().map(|e| e.1.clone()).collect()
+            tags: self.media_lines.iter().map(|e| RefCell::borrow(e).id.clone()).collect::<Vec<String>>()
         })).unwrap();
 
-        let mut keys = self.media_channel.keys().map(|e| e.clone()).collect::<Vec<MediaId>>();
-        keys.sort_by_key(|e| e.0);
+        for media_line in self.media_lines.iter() {
+            let media_line = RefCell::borrow(media_line);
+            let mut media = {
+                if media_line.media_type == SdpMediaValue::Application {
+                    let mut media = self.application_channel.generate_local_description()
+                        .map_err(|err| CreateAnswerError::InternalError(err))?;
 
-        for media_id in keys.iter() {
-            let channel = self.media_channel.get(media_id).expect("missing expected key").clone();
-            let channel = channel.lock().unwrap();
+                    media.add_attribute(SdpAttribute::Mid(media_line.id.clone()));
+                    media
+                } else {
+                    let mut media = media_line.generate_local_description()
+                        .ok_or(CreateAnswerError::DescribeError(media_line.index))?;
 
-            let mut media = channel.generate_sdp()
-                .map_err(|err| CreateAnswerError::MediaLineError{ media_id: (*media_id).clone(), error: err })?;
+                    for sender in self.stream_sender.values()
+                        .filter(|sender| RefCell::borrow(sender).track.media_line == media_line.index) {
+                        let sender = RefCell::borrow(sender);
+                        sender.track.write_sdp(&mut media);
+                    }
 
-            let ice_channel = self.find_ice_channel_by_media_fragment(&MediaIdFragment::Full((*media_id).clone()))
-                .expect("missing ice channel for media channel");
-            let ice_channel = RefCell::borrow(ice_channel);
+                    media
+                }
+            };
 
-            media.add_attribute(SdpAttribute::Mid(media_id.1.clone())).unwrap();
+            let ice_channel = self.transport.get(&media_line.transport_id);
+            if ice_channel.is_none() {
+                return Err(CreateAnswerError::MissingTransportChannel(media_line.index));
+            }
+            let ice_channel = RefCell::borrow(ice_channel.unwrap());
+
             media.add_attribute(SdpAttribute::IceUfrag(ice_channel.local_credentials.username.clone())).unwrap();
             media.add_attribute(SdpAttribute::IcePwd(ice_channel.local_credentials.password.clone())).unwrap();
             media.add_attribute(SdpAttribute::IceOptions(vec![String::from("trickle")])).unwrap();
@@ -326,40 +413,86 @@ impl PeerConnection {
         Ok(answer)
     }
 
+    fn allocate_sender_media_line(&mut self, media_type: SdpMediaValue) -> Rc<RefCell<MediaLine>> {
+        for line in self.media_lines.iter() {
+            let ref_line = RefCell::borrow(line);
+            if ref_line.media_type != media_type { continue; }
+            if !ref_line.local_streams.is_empty() { continue; }
+            return line.clone();
+        }
+
+        let mut line = MediaLine::new(self.media_lines.len() as u32,String::from(format!("{}", self.media_lines.len())), media_type);
+
+        /* FIXME: If no transport exists create one! */
+        let transport = RefCell::borrow(self.transport.values().find(|_| true).unwrap());
+        line.transport_id = transport.transport_id;
+
+        let line = Rc::new(RefCell::new(line));
+        self.media_lines.push(line.clone());
+        return line;
+    }
+
+    pub fn add_media_sender(&mut self, media_type: SdpMediaValue) -> Result<MediaSender, ()> {
+        /* find or create a free media line */
+        let media_line = self.allocate_sender_media_line(media_type);
+        let mut media_line = RefCell::borrow_mut(&media_line);
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (ctx, crx) = mpsc::unbounded_channel();
+        let mut internal_sender = InternalMediaSender {
+            track: InternalMediaTrack {
+                /* TODO: Ensure this hasn't been used already */
+                id: rand::random::<u32>(),
+                media_line: media_line.index,
+                properties: HashMap::new(),
+
+                transport_id: media_line.transport_id,
+                transport: RefCell::borrow(self.transport.get(&media_line.transport_id).expect("missing transport")).control_sender.clone(),
+            },
+
+            events: tx,
+            control: Some(crx)
+        };
+        /* A channel name is required so we add one */
+        internal_sender.track.properties.insert(String::from("cname"), Some(String::from(format!("{}", internal_sender.track.id))));
+
+        let sender = MediaSender {
+            control: ctx,
+            events: rx,
+            id: internal_sender.track.id
+        };
+
+        /* TODO: Trigger renegotiation */
+        media_line.local_streams.push(internal_sender.track.id);
+        self.stream_sender.insert(internal_sender.track.id, Rc::new(RefCell::new(internal_sender)));
+        Ok(sender)
+    }
+
+    pub fn create_data_channel(&mut self, channel_type: DataChannelType, label: String, protocol: Option<String>, priority: u16) -> Result<DataChannel, String> {
+        /* TODO: Trigger renegotiation if we're not yet having a application media line */
+        self.application_channel.create_data_channel(channel_type, label, protocol, priority)
+    }
+
     /// Adding a remote ice candidate.
     /// To signal a no more candidates event just add `None`
-    pub fn add_remove_ice_candidate(&mut self, media_fragment: &MediaIdFragment, candidate: Option<&Candidate>) -> Result<(), RTCTransportICECandidateAddError> {
-        if let Some(channel) = self.find_ice_channel_by_media_fragment(media_fragment) {
+    pub fn add_remote_ice_candidate(&mut self, media_line_index: u32, candidate: Option<&Candidate>) -> Result<(), RTCTransportICECandidateAddError> {
+        if let Some(channel) = self.find_ice_channel_by_media_fragment(media_line_index) {
             /* in theory the channel should not be borrowed elsewhere */
             let mut channel = RefCell::borrow_mut(channel);
 
-            if !media_fragment.matches(&channel.owning_media_id) {
-                Ok(())
-            } else {
+            if channel.owning_media_line == media_line_index {
                 channel.add_remote_candidate(candidate)
+            } else {
+                Ok(())
             }
         } else {
             Err(RTCTransportICECandidateAddError::UnknownMediaChannel)
         }
     }
 
-    pub fn finish_remote_ice_candidates(&mut self) {
-        /* FIXME: Expose the media streams and let the client call add_remove_ice_candidate */
-        self.ice_channels.iter_mut().for_each(|channel| {
-            let _ = RefCell::borrow_mut(channel).add_remote_candidate(None).map_err(|error| {
-                eprintln!("Failed to add ice candidate finished: {:?}", error);
-                ()
-            });
-        });
-    }
-
-    pub fn media_channels_mut(&mut self) -> Vec<Arc<Mutex<dyn media::MediaChannel>>> {
-        self.media_channel.iter_mut().map(|e| e.1.clone()).collect()
-    }
-
-    fn create_ice_channel(&mut self, credentials: &ICECredentials, media_id: MediaId, setup: SdpAttributeSetup) -> Result<Rc<RefCell<RTCTransport>>, RemoteDescriptionApplyError> {
-        if let Some(channel) = self.ice_channels.iter_mut().find(|entry| {
-            let entry = RefCell::borrow(entry);
+    fn create_ice_channel(&mut self, credentials: &ICECredentials, media_line: u32, setup: SdpAttributeSetup) -> Result<Rc<RefCell<RTCTransport>>, RemoteDescriptionApplyError> {
+        if let Some((_, channel)) = self.transport.iter().find(|entry| {
+            let entry = RefCell::borrow(entry.1);
             &entry.remote_credentials == credentials
         }) {
             if RefCell::borrow(channel).setup.to_string() != setup.to_string() {
@@ -368,13 +501,14 @@ impl PeerConnection {
                 Ok(channel.clone())
             }
         } else {
-            println!("Creating a new channel");
+            println!("Creating a new transport channel");
             /* register a new channel */
-            let stream = libnice::ice::Agent::stream_builder(&mut self.ice_agent, 1).build().map_err(|error| RemoteDescriptionApplyError::FailedToAddIceStream { error })?;
+            let stream = libnice::ice::Agent::stream_builder(&mut self.ice_agent, 1).build()
+                .map_err(|error| RemoteDescriptionApplyError::FailedToAddIceStream { error })?;
 
             #[allow(unused_mut)]
-            let mut connection = RTCTransport::new(stream, credentials.clone(), media_id.clone(), setup)
-                .map_err(|err| RemoteDescriptionApplyError::IceInitializeError { result: err, media_id: media_id.clone() })?;
+            let mut connection = RTCTransport::new(stream, credentials.clone(), media_line, setup)
+                .map_err(|err| RemoteDescriptionApplyError::IceInitializeError { result: err, media_id: media_line })?;
 
             /* FIXME! */
             #[cfg(feature = "simulated-loss")]
@@ -382,46 +516,34 @@ impl PeerConnection {
                 //connection.set_simulated_loss(20);
             }
 
+            let id = connection.transport_id;
             let connection = Rc::new(RefCell::new(connection));
-            self.ice_channels.push(connection);
+            self.transport.insert(id, connection.clone());
 
-            Ok(self.ice_channels.last_mut().unwrap().clone())
+            Ok(connection)
         }
     }
 
-    fn find_ice_channel_by_media_fragment(&mut self, media_fragment: &MediaIdFragment) -> Option<&Rc<RefCell<RTCTransport>>> {
-        self.ice_channels.iter().find(|channel| RefCell::borrow(channel).media_ids.iter().find(|media| media_fragment.matches(media)).is_some())
-    }
-
-    fn dispatch_media_event(&self, ice: &mut RefMut<RTCTransport>, event: MediaChannelIncomingEvent) {
-        let mut event = Some(event);
-        for stream_id in ice.media_ids.iter() {
-            let channel = self.media_channel.get(stream_id)
-                .expect("missing media channel, but it's registered on an ice connection");
-
-            let mut channel = channel.lock().unwrap();
-            channel.process_peer_event(&mut event);
-            if event.is_none() {
-                /* event has been consumed */
-                break;
-            }
-        }
+    fn find_ice_channel_by_media_fragment(&self, media_line: u32) -> Option<&Rc<RefCell<RTCTransport>>> {
+        self.transport.iter().find(|channel| RefCell::borrow(channel.1).media_lines.iter().find(|media| **media == media_line).is_some())
+            .map(|e| e.1)
     }
 
     fn handle_ice_event(&mut self, ice: &mut RefMut<RTCTransport>, event: RTCTransportEvent) -> Option<PeerConnectionEvent> {
         match event {
             RTCTransportEvent::LocalIceCandidate(candidate) => {
-                return Some(PeerConnectionEvent::LocalIceCandidate(Some(candidate.into()), ice.owning_media_id.clone()));
+                return Some(PeerConnectionEvent::LocalIceCandidate(Some(candidate.into()), ice.owning_media_line));
             },
             RTCTransportEvent::LocalIceGatheringFinished() => {
-                return Some(PeerConnectionEvent::LocalIceCandidate(None, ice.owning_media_id.clone()));
+                return Some(PeerConnectionEvent::LocalIceCandidate(None, ice.owning_media_line));
             },
             RTCTransportEvent::DtlsInitialized() => {
-                self.dispatch_media_event(ice, MediaChannelIncomingEvent::TransportInitialized);
+                self.application_channel.handle_transport_initialized();
                 None
             },
             RTCTransportEvent::MessageReceivedDtls(message) => {
-                self.dispatch_media_event(ice, MediaChannelIncomingEvent::DtlsDataReceived(message));
+                /* TODO: Test if the ice transport we're receiving it from matches our application channel */
+                self.application_channel.handle_data(message);
                 None
             },
             RTCTransportEvent::MessageReceivedRtcp(message) => {
@@ -435,6 +557,7 @@ impl PeerConnection {
                 for index in 0..packet_count.unwrap() {
                     match RtcpPacket::parse(packets[index]) {
                         Ok(packet) => {
+                            /*
                             let mut buffer = [0u8; 2038];
                             match packet.write(&mut buffer) {
                                 Err(error) => {
@@ -456,7 +579,54 @@ impl PeerConnection {
                                     }
                                 }
                             }
-                            self.dispatch_media_event(ice, MediaChannelIncomingEvent::RtcpPacketReceived(packet));
+                            */
+
+                            match packet {
+                                RtcpPacket::ReceiverReport(rr) => {
+                                    if let Some(sender) = self.stream_sender.get(&rr.ssrc) {
+                                        RefCell::borrow_mut(sender).handle_receiver_report(rr);
+                                    } else {
+                                        let _ = self.local_events.0.send(PeerConnectionEvent::UnassignableRtcpPacket(RtcpPacket::ReceiverReport(rr)));
+                                    }
+                                },
+                                RtcpPacket::SenderReport(sr) => {
+                                    if let Some(receiver) = self.stream_receiver.get(&sr.ssrc) {
+                                        RefCell::borrow_mut(receiver).handle_sender_report(sr);
+                                    } else {
+                                        let _ = self.local_events.0.send(PeerConnectionEvent::UnassignableRtcpPacket(RtcpPacket::SenderReport(sr)));
+                                    }
+                                },
+                                RtcpPacket::SourceDescription(sd) => {
+                                    for (id, description) in sd.descriptions.iter() {
+                                        if let Some(receiver) = self.stream_receiver.get(&id) {
+                                            RefCell::borrow_mut(receiver).handle_source_description(description);
+                                        }
+                                    }
+                                },
+                                RtcpPacket::TransportFeedback(fb) => {
+                                    if let Some(sender) = self.stream_sender.get(&fb.media_ssrc) {
+                                        RefCell::borrow_mut(sender).handle_transport_feedback(fb.feedback);
+                                    } else {
+                                        let _ = self.local_events.0.send(PeerConnectionEvent::UnassignableRtcpPacket(RtcpPacket::TransportFeedback(fb)));
+                                    }
+                                },
+                                RtcpPacket::PayloadFeedback(pfb) => {
+                                    if let Some(sender) = self.stream_sender.get(&pfb.media_ssrc) {
+                                        RefCell::borrow_mut(sender).handle_payload_feedback(pfb.feedback);
+                                    } else {
+                                        let _ = self.local_events.0.send(PeerConnectionEvent::UnassignableRtcpPacket(RtcpPacket::PayloadFeedback(pfb)));
+                                    }
+                                },
+                                RtcpPacket::Unknown(data) => {
+                                    self.stream_receiver.iter().for_each(|receiver|
+                                        RefCell::borrow_mut(receiver.1).handle_unknown_rtcp(&data)
+                                    );
+
+                                    self.stream_sender.iter().for_each(|receiver|
+                                        RefCell::borrow_mut(receiver.1).handle_unknown_rtcp(&data)
+                                    );
+                                }
+                            }
                         },
                         Err(error) => {
                             eprintln!("Failed to decode RTCP packet: {:?}", error);
@@ -468,9 +638,19 @@ impl PeerConnection {
             RTCTransportEvent::MessageReceivedRtp(message) => {
                 match ParsedRtpPacket::new(message) {
                     Ok(reader) => {
-                        self.dispatch_media_event(ice, MediaChannelIncomingEvent::RtpPacketReceived(reader));
+                        if let Some(receiver) = self.stream_receiver.get(&reader.ssrc()) {
+                            let mut receiver = RefCell::borrow_mut(receiver);
+                            if receiver.track.transport_id != ice.transport_id {
+                                eprintln!("Received RTP message for receiver, but receiver isn't registered to that transport");
+                            } else {
+                                receiver.handle_rtp_packet(reader);
+                            }
+                        } else {
+                            let _ = self.local_events.0.send(PeerConnectionEvent::UnassignableRtpPacket(reader));
+                        }
                     },
                     Err((error, _)) => {
+                        /* TODO: Don't log spam here */
                         eprintln!("Failed to decode RTP packet: {:?}", error);
                     }
                 }
@@ -494,8 +674,32 @@ impl futures::stream::Stream for PeerConnection {
     type Item = PeerConnectionEvent;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let streams = self.ice_channels.clone();
-        for stream in streams.iter() {
+        if let Poll::Ready(message) = self.local_events.1.poll_next_unpin(cx) {
+            return Poll::Ready(Some(message.expect("unexpected local event stream close")));
+        }
+
+        for receiver in self.stream_receiver.values() {
+            RefCell::borrow_mut(receiver).poll_control(cx);
+        }
+
+        for receiver in self.stream_sender.values() {
+            RefCell::borrow_mut(receiver).poll_control(cx);
+        }
+
+        while let Poll::Ready(event) = self.application_channel.poll_next_unpin(cx) {
+            let event = event.expect("unexpected stream end");
+            match event {
+                ApplicationChannelEvent::DataChannelReceived(channel) => {
+                    return Poll::Ready(Some(PeerConnectionEvent::ReceivedDataChannel(channel)));
+                },
+                ApplicationChannelEvent::StateChanged { new_state } => {
+                    /* TODO: Track the application channel state */
+                }
+            }
+        }
+
+        let streams = self.transport.clone();
+        for (_, stream) in streams.iter() {
             let mut stream = RefCell::borrow_mut(stream);
             while let Poll::Ready(event) = stream.poll_next_unpin(cx) {
                 if let Some(event) = event {
@@ -518,18 +722,18 @@ impl futures::stream::Stream for PeerConnection {
 mod test {
     use crate::utils::rtcp::RtcpPacket;
 
+    const FIREFOX_PACKET: [u8; 52] = [129, 202, 0, 12, 77, 252, 33, 133, 1, 38, 123, 52, 98, 49, 100, 49, 100, 56, 54, 45, 100, 52, 98, 99, 45, 52, 52, 97, 50, 45, 97, 57, 50, 100, 45, 54, 101, 52, 55, 101, 101, 49, 101, 100, 54, 97, 51, 125, 0, 0, 0, 0];
+
     #[test]
     fn test_packet_split_up() {
-        let message = [129, 202, 0, 12, 77, 252, 33, 133, 1, 38, 123, 52, 98, 49, 100, 49, 100, 56, 54, 45, 100, 52, 98, 99, 45, 52, 52, 97, 50, 45, 97, 57, 50, 100, 45, 54, 101, 52, 55, 101, 101, 49, 101, 100, 54, 97, 51, 125, 0, 0, 0, 0];
         let mut packets = [&[0u8][..]; 128];
-        let packet_count = RtcpPacket::split_up_packets(&message[..], &mut packets[..]);
+        let packet_count = RtcpPacket::split_up_packets(&FIREFOX_PACKET[..], &mut packets[..]);
         assert_eq!(packet_count.unwrap(), 1usize);
     }
 
     #[test]
     fn test_packet_parse() {
-        let message = [129, 202, 0, 12, 77, 252, 33, 133, 1, 38, 123, 52, 98, 49, 100, 49, 100, 56, 54, 45, 100, 52, 98, 99, 45, 52, 52, 97, 50, 45, 97, 57, 50, 100, 45, 54, 101, 52, 55, 101, 101, 49, 101, 100, 54, 97, 51, 125, 0, 0, 0, 0];
-        let parsed = RtcpPacket::parse(&message[..]).expect("failed to decode valid packet");
+        let parsed = RtcpPacket::parse(&FIREFOX_PACKET[..]).expect("failed to decode valid packet");
         println!("{:?}", parsed);
     }
 }

@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 
 use libnice::ice::{ComponentState, Candidate, ComponentWriter};
-use crate::rtc::{MediaId};
 use tokio::sync::mpsc;
 use std::pin::Pin;
 use futures::prelude::*;
@@ -27,6 +26,7 @@ use std::ops::Deref;
 use crate::srtp2::{Srtp2, Srtp2ErrorCode};
 use crate::utils::rtp::is_rtp_header;
 use crate::utils::rtcp::is_rtcp_header;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 #[derive(Clone)]
 pub struct DebugableCandidate {
@@ -118,10 +118,13 @@ enum DTLSState {
 }
 
 pub struct RTCTransport {
+    /// A unique id identifying this transport
+    pub transport_id: u32,
+
     /// Index of the "owning" media line
-    pub owning_media_id: MediaId,
+    pub owning_media_line: u32,
     /// Containing all media lines which actively listening to the channel events (bundled channels)
-    pub media_ids: Vec<MediaId>,
+    pub media_lines: Vec<u32>,
 
     pub local_credentials: ICECredentials,
     pub remote_credentials: ICECredentials,
@@ -152,6 +155,7 @@ pub struct RTCTransport {
     srtp: Option<Srtp2>,
 }
 
+static TRANSPORT_ID_INDEX: AtomicU32 = AtomicU32::new(1);
 impl RTCTransport {
     fn generate_ssl_components() -> Result<(pkey::PKey<pkey::Private>, x509::X509, SdpAttributeFingerprint, ssl::Ssl), RTCTransportInitializeError> {
         let private_key = rsa::Rsa::generate_with_e(4096, &BigNum::from_u32(0x10001u32).unwrap())
@@ -229,7 +233,7 @@ impl RTCTransport {
 
     pub fn new(mut stream: libnice::ice::Stream,
                remote_credentials: ICECredentials,
-               media_id: MediaId,
+               media_line: u32,
                setup: SdpAttributeSetup
     ) -> Result<RTCTransport, RTCTransportInitializeError> {
         assert_eq!(stream.components().len(), 1, "expected only one stream component");
@@ -248,8 +252,10 @@ impl RTCTransport {
         let (ctx, crx) = mpsc::unbounded_channel();
 
         let connection = RTCTransport {
-            owning_media_id: media_id,
-            media_ids: Vec::with_capacity(3),
+            transport_id: TRANSPORT_ID_INDEX.fetch_add(1, Ordering::Relaxed),
+
+            owning_media_line: media_line,
+            media_lines: Vec::with_capacity(3),
 
             remote_credentials,
             local_credentials: ICECredentials{
@@ -308,14 +314,6 @@ impl RTCTransport {
             self.remote_candidates_gathered = true;
             Ok(())
         }
-    }
-
-    pub fn register_media_channel(&mut self, media_id: &MediaId) {
-        self.media_ids.push(media_id.clone());
-    }
-
-    pub fn remove_media_channel(&mut self, media_id: &MediaId) {
-        self.media_ids.retain(|entry| entry != media_id);
     }
 
     #[cfg(feature = "simulated-loss")]
@@ -498,8 +496,9 @@ impl Stream for RTCTransport {
                             /* TODO: Shutdown handling */
                             let _ = std::mem::replace(&mut self.dtls, Some(DTLSState::Failed()));
                             println!("DTLS read returned EOF");
+                        } else {
+                            return Poll::Ready(Some(RTCTransportEvent::MessageReceivedDtls(buffer[..read].to_vec())));
                         }
-                        return Poll::Ready(Some(RTCTransportEvent::MessageReceivedDtls(buffer[..read].to_vec())));
                     },
                     Err(error) => {
                         match &error.kind() {

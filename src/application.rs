@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use tokio::sync::mpsc;
-use crate::rtc::{MediaId, ACT_PASS_DEFAULT_SETUP_TYPE};
+use crate::rtc::{ACT_PASS_DEFAULT_SETUP_TYPE};
 use webrtc_sdp::media_type::{SdpMedia, SdpMediaLine, SdpMediaValue, SdpFormatList, SdpProtocolValue};
 use crate::transport::{RTCTransportControl};
 use webrtc_sdp::attribute_type::{SdpAttribute, SdpAttributeSetup, SdpAttributeSctpmap, SdpAttributeType};
@@ -15,7 +15,6 @@ use futures::{StreamExt, Stream};
 use std::io::{Read, Write};
 use std::cell::RefCell;
 use std::rc::Rc;
-use crate::media::{MediaChannel, TypedMediaChannel, MediaChannelIncomingEvent};
 use std::ops::{DerefMut, Deref};
 use std::collections::{VecDeque, BTreeMap};
 use futures::io::ErrorKind;
@@ -23,15 +22,14 @@ use crate::sctp::notification::{SctpNotificationType, SctpNotification, SctpNoti
 use crate::sctp::message::{DataChannelMessage as RawDataChannelMessage, DataChannelType, DataChannelControlMessage, DataChannelControlMessageOpenAck, DataChannelControlMessageOpen};
 use crate::sctp::sctp_macros::{SCTP_ALL_ASSOC, SCTP_STREAM_RESET_DENIED, SCTP_STREAM_RESET_FAILED, SCTP_STREAM_RESET_INCOMING_SSN, SPP_PMTUD_ENABLE, SPP_PMTUD_DISABLE, SCTP_EOR, SCTP_UNORDERED};
 
-/// Events which are emitted by the `MediaChannelApplication`.
-#[derive(Debug, PartialEq)]
-pub enum MediaChannelApplicationEvent {
-    DataChannelReceived{ channel_id: u32, label: String, channel_type: DataChannelType },
-    StateChanged{ new_state: MediaChannelApplicationState }
+/// Events which are emitted by the `ApplicationChannel`.
+pub enum ApplicationChannelEvent {
+    DataChannelReceived(DataChannel),
+    StateChanged{ new_state: ApplicationChannelState }
 }
 
 #[derive(Debug, PartialEq)]
-pub enum MediaChannelApplicationState {
+pub enum ApplicationChannelState {
     Disconnected,
     Connecting,
     Connected
@@ -54,9 +52,8 @@ struct InternalDataChannel {
 }
 
 /// The implementation for the application media channel aka Data Channels
-pub struct MediaChannelApplication {
-    media_id: MediaId,
-    state: MediaChannelApplicationState,
+pub(crate) struct ChannelApplication {
+    state: ApplicationChannelState,
 
     max_incoming_channel: u16, /* Don't modify once initialized */
     max_outgoing_channel: u16, /* Don't modify once initialized */
@@ -69,18 +66,19 @@ pub struct MediaChannelApplication {
     pending_stream_resets: Vec<u16>,
 
     dtls_role_client: bool,
-    ice_control: mpsc::UnboundedSender<RTCTransportControl>,
+
+    pub transport_id: u32,
+    pub transport: Option<mpsc::UnboundedSender<RTCTransportControl>>,
 
     internal_channels: BTreeMap<u16, Rc<RefCell<InternalDataChannel>>>,
-    channels: VecDeque<DataChannel>,
     channel_id_index: u32,
 
     channel_communication_receiver: mpsc::UnboundedReceiver<DataChannelAction>,
     channel_communication_sender: mpsc::UnboundedSender<DataChannelAction>,
 }
 
-impl MediaChannelApplication {
-    pub fn new(media_id: MediaId, ice_control: mpsc::UnboundedSender<RTCTransportControl>) -> Option<Self> {
+impl ChannelApplication {
+    pub fn new() -> Option<Self> {
         let stream = Rc::new(RefCell::new(SctpStreamInner {
             read_queue: VecDeque::new(),
             read_index: 0,
@@ -92,24 +90,24 @@ impl MediaChannelApplication {
         if sctp_session.is_none() { return None; }
 
         let (tx, rx) = mpsc::unbounded_channel();
-        Some(MediaChannelApplication {
-            media_id,
-            state: MediaChannelApplicationState::Disconnected,
+        Some(ChannelApplication {
+            state: ApplicationChannelState::Disconnected,
 
             max_incoming_channel: 1024,
             max_outgoing_channel: 1024,
 
-            stream: stream,
+            stream,
             sctp_session: sctp_session.unwrap(),
             pending_stream_resets: Vec::new(),
 
-            ice_control,
+            transport_id: 0,
+            transport: None,
+
             dtls_role_client: true, /* initially assume we're the client */
             poll_waker: None,
             remote_config: None,
 
             internal_channels: BTreeMap::new(),
-            channels: VecDeque::new(),
             channel_id_index: 0,
 
             channel_communication_receiver: rx,
@@ -117,33 +115,7 @@ impl MediaChannelApplication {
         })
     }
 
-    pub fn data_channels(&self) -> &VecDeque<DataChannel> {
-        &self.channels
-    }
-
-    pub fn data_channels_mut(&mut self) -> &mut VecDeque<DataChannel> {
-        &mut self.channels
-    }
-
-    pub fn find_data_channel(&self, channel_id: u32) -> Option<&DataChannel> {
-        self.channels.iter().enumerate().find(|e| e.1.channel_id == channel_id)
-            .map(|e| e.1)
-    }
-
-    pub fn find_data_channel_mut(&mut self, channel_id: u32) -> Option<&mut DataChannel> {
-        self.channels.iter_mut().enumerate()
-            .find(|e| e.1.channel_id == channel_id)
-            .map(|e| e.1)
-    }
-
-    pub fn take_data_channel(&mut self, channel_id: u32) -> Option<DataChannel> {
-        self.channels.iter().enumerate()
-            .find(|e| e.1.channel_id == channel_id)
-            .map(|e| e.0)
-            .map(|index| self.channels.remove(index).unwrap())
-    }
-
-    pub fn create_data_channel(&mut self, channel_type: DataChannelType, label: String, protocol: Option<String>, priority: u16) -> Result<&mut DataChannel, String> {
+    pub fn create_data_channel(&mut self, channel_type: DataChannelType, label: String, protocol: Option<String>, priority: u16) -> Result<DataChannel, String> {
         let (tx, rx) = mpsc::unbounded_channel();
         let mut internal_channel = InternalDataChannel {
             channel_id: self.channel_id_index,
@@ -172,7 +144,7 @@ impl MediaChannelApplication {
         }
         internal_channel.internal_channel_id = internal_channel_id;
 
-        if self.state == MediaChannelApplicationState::Connected {
+        if self.state == ApplicationChannelState::Connected {
             internal_channel.state = DataChannelState::Connecting;
             self.send_open_request(&internal_channel);
             self.send_message(&internal_channel, &RawDataChannelMessage::String(String::from("HEY!")), false);
@@ -193,8 +165,7 @@ impl MediaChannelApplication {
 
         self.channel_id_index = self.channel_id_index.wrapping_add(1);
         self.internal_channels.insert(internal_channel_id, Rc::new(RefCell::new(internal_channel)));
-        self.channels.push_back(channel);
-        Ok(self.channels.back_mut().unwrap())
+        Ok(channel)
     }
 
     fn configure_sctp(&mut self) -> Result<(), std::io::Error> {
@@ -213,7 +184,7 @@ impl MediaChannelApplication {
         Ok(())
     }
 
-    fn process_sctp_message(&mut self, channel_id: u16, message: RawDataChannelMessage) -> Option<MediaChannelApplicationEvent> {
+    fn process_sctp_message(&mut self, channel_id: u16, message: RawDataChannelMessage) -> Option<ApplicationChannelEvent> {
         match message {
             RawDataChannelMessage::Control(message) => self.process_control_message(channel_id, message),
             RawDataChannelMessage::Binary(_) |
@@ -242,7 +213,7 @@ impl MediaChannelApplication {
         }
     }
 
-    fn process_control_message(&mut self, internal_channel_id: u16, message: DataChannelControlMessage) -> Option<MediaChannelApplicationEvent> {
+    fn process_control_message(&mut self, internal_channel_id: u16, message: DataChannelControlMessage) -> Option<ApplicationChannelEvent> {
         match message {
             DataChannelControlMessage::Open(request) => {
                 /*
@@ -273,7 +244,7 @@ impl MediaChannelApplication {
                 let channel_id = self.channel_id_index;
 
                 let (tx, rx) = mpsc::unbounded_channel();
-                let channel = InternalDataChannel {
+                let internal_channel = InternalDataChannel {
                     channel_id,
                     internal_channel_id,
 
@@ -288,7 +259,7 @@ impl MediaChannelApplication {
                     event_sender: tx
                 };
 
-                let public_channel = DataChannel {
+                let channel = DataChannel {
                     channel_id,
                     internal_channel_id,
 
@@ -303,11 +274,10 @@ impl MediaChannelApplication {
                 };
 
                 self.channel_id_index = self.channel_id_index.wrapping_add(1);
-                self.send_open_acknowledge(&channel);
-                self.internal_channels.insert(internal_channel_id, Rc::new(RefCell::new(channel)));
-                self.channels.push_back(public_channel);
+                self.send_open_acknowledge(&internal_channel);
+                self.internal_channels.insert(internal_channel_id, Rc::new(RefCell::new(internal_channel)));
 
-                return Some(MediaChannelApplicationEvent::DataChannelReceived { channel_id, label: request.label.clone(), channel_type: request.channel_type })
+                return Some(ApplicationChannelEvent::DataChannelReceived(channel))
             },
             DataChannelControlMessage::OpenAck(_) => {
                 if let Some(channel) = self.internal_channels.get(&internal_channel_id) {
@@ -326,7 +296,7 @@ impl MediaChannelApplication {
         None
     }
 
-    fn process_sctp_notification(&mut self, notification: &SctpNotification) -> Option<MediaChannelApplicationEvent> {
+    fn process_sctp_notification(&mut self, notification: &SctpNotification) -> Option<ApplicationChannelEvent> {
         match notification {
             SctpNotification::StreamReset(event) => self.process_sctp_notification_stream_reset(event),
             SctpNotification::AssocChange(event) => self.process_sctp_notification_assoc_change(event),
@@ -337,7 +307,7 @@ impl MediaChannelApplication {
         }
     }
 
-    fn process_sctp_notification_stream_reset(&mut self, notification: &SctpNotificationStreamReset) -> Option<MediaChannelApplicationEvent> {
+    fn process_sctp_notification_stream_reset(&mut self, notification: &SctpNotificationStreamReset) -> Option<ApplicationChannelEvent> {
         if (notification.flags & SCTP_STREAM_RESET_DENIED as u16) == 0 &&
             (notification.flags & SCTP_STREAM_RESET_FAILED as u16) == 0 &&
             (notification.flags & SCTP_STREAM_RESET_INCOMING_SSN as u16) != 0 {
@@ -357,7 +327,6 @@ impl MediaChannelApplication {
                 }
 
                 self.internal_channels.remove(channel_id);
-                self.channels.retain(|chan| chan.internal_channel_id != *channel_id);
             }
         }
 
@@ -365,12 +334,12 @@ impl MediaChannelApplication {
         None
     }
 
-    fn process_sctp_notification_assoc_change(&mut self, notification: &SctpNotificationAssocChange) -> Option<MediaChannelApplicationEvent> {
+    fn process_sctp_notification_assoc_change(&mut self, notification: &SctpNotificationAssocChange) -> Option<ApplicationChannelEvent> {
         println!("Assoc change: {:?}", notification);
         match notification.state {
             SctpSacState::CommUp => {
-                self.state = MediaChannelApplicationState::Connected;
-                return Some(MediaChannelApplicationEvent::StateChanged { new_state: MediaChannelApplicationState::Connected });
+                self.state = ApplicationChannelState::Connected;
+                return Some(ApplicationChannelEvent::StateChanged { new_state: ApplicationChannelState::Connected });
             },
             _ => {}
         }
@@ -445,19 +414,11 @@ impl MediaChannelApplication {
     }
 }
 
-impl MediaChannel for MediaChannelApplication {
-    fn as_typed(&mut self) -> TypedMediaChannel {
-        TypedMediaChannel::Application(self)
-    }
-
-    fn media_id(&self) -> &MediaId {
-        &self.media_id
-    }
-
-    fn configure(&mut self, media: &SdpMedia) -> Result<(), String> {
+impl ChannelApplication {
+    pub fn set_remote_description(&mut self, media: &SdpMedia) -> Result<(), String> {
         println!("Configuring application channel");
 
-        self.dtls_role_client = match media.get_attribute(SdpAttributeType::Setup) {
+        let dtls_role_client = match media.get_attribute(SdpAttributeType::Setup) {
             Some(SdpAttribute::Setup(SdpAttributeSetup::Active)) => Ok(true),
             Some(SdpAttribute::Setup(SdpAttributeSetup::Passive)) => Ok(false),
             Some(SdpAttribute::Setup(SdpAttributeSetup::Actpass)) => {
@@ -470,22 +431,33 @@ impl MediaChannel for MediaChannelApplication {
             _ => Err(String::from("missing/invalid setup type"))
         }?;
 
-        /* TODO: Adjust already existing data channel ids */
-        self.configure_sctp().map_err(|e| format!("sctp configure failed: {}", e))?;
-
-
         let mut remote_port = 5000u16; /* 5000 is the default */
         if let Some(SdpAttribute::Sctpmap(map)) = media.get_attribute(SdpAttributeType::Sctpmap) {
             remote_port = map.port;
         }
 
-        self.remote_config = Some(RemoteConfig{
-            port: remote_port
-        });
+        if let Some(remote_config) = &self.remote_config {
+            if self.dtls_role_client != dtls_role_client {
+                return Err(String::from("client/server role miss match to previous description"));
+            }
+
+            if remote_config.port != remote_port {
+                return Err(String::from("remote port miss match to previous description"));
+            }
+        } else {
+            self.dtls_role_client = dtls_role_client;
+
+            /* TODO: Adjust already existing data channel ids */
+            self.configure_sctp().map_err(|e| format!("sctp configure failed: {}", e))?;
+            self.remote_config = Some(RemoteConfig{
+                port: remote_port
+            });
+        }
+
         Ok(())
     }
 
-    fn generate_sdp(&self) -> Result<SdpMedia, String> {
+    pub fn generate_local_description(&self) -> Result<SdpMedia, String> {
         let mut media = SdpMedia::new(SdpMediaLine {
             media: SdpMediaValue::Application,
             formats: SdpFormatList::Integers(vec![self.sctp_session.local_port as u32]),
@@ -493,6 +465,7 @@ impl MediaChannel for MediaChannelApplication {
             port_count: 0,
             proto: SdpProtocolValue::DtlsSctp
         });
+
         media.set_connection(SdpConnection{
             address: ExplicitlyTypedAddress::Ip(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
             ttl: None,
@@ -506,42 +479,40 @@ impl MediaChannel for MediaChannelApplication {
         Ok(media)
     }
 
-    fn process_peer_event(&mut self, event: &mut Option<MediaChannelIncomingEvent>) {
-        match event.as_ref().unwrap() {
-            MediaChannelIncomingEvent::DtlsDataReceived(..) => {
-                let mut sctp_buffer = RefCell::borrow_mut(&self.stream);
-
-                if let MediaChannelIncomingEvent::DtlsDataReceived(message) = event.take().unwrap() {
-                    sctp_buffer.read_queue.push_back(message);
-                } else {
-                    panic!();
-                }
-
-                if let Some(waker) = &self.poll_waker { waker.wake_by_ref(); }
-            },
-            MediaChannelIncomingEvent::TransportInitialized => {
-                self.sctp_session.connect(self.remote_config.as_ref().expect("missing remote config").port);
-
-                let _result = self.sctp_session.change_peer_addr_params(|params| {
-                    params.spp_flags &= !SPP_PMTUD_ENABLE;
-                    params.spp_flags |= SPP_PMTUD_DISABLE;
-
-                    /* 1280 for IPv6 and 1200 for IPv4, so 1200 fits for all */
-                    params.spp_pathmtu = 1200;
-                });
-                /* The call failes on windows anyways
-                if let Err(error) = result {
-                    eprintln!("Failed to configure the sctp peer: {}", error);
-                }
-                */
-            },
-            _ => {}
+    pub fn handle_transport_initialized(&mut self) {
+        if self.transport.is_none() {
+            return;
         }
+
+        self.sctp_session.connect(self.remote_config.as_ref().expect("missing remote config").port);
+
+        let _result = self.sctp_session.change_peer_addr_params(|params| {
+            params.spp_flags &= !SPP_PMTUD_ENABLE;
+            params.spp_flags |= SPP_PMTUD_DISABLE;
+
+            /* 1280 for IPv6 and 1200 for IPv4, so 1200 fits for all */
+            params.spp_pathmtu = 1200;
+        });
+        /* The call failes on windows anyways
+        if let Err(error) = result {
+            eprintln!("Failed to configure the sctp peer: {}", error);
+        }
+        */
+    }
+
+    pub fn handle_data(&mut self, message: Vec<u8>) {
+        if self.transport.is_none() {
+            eprintln!("Received DTLS data for SCTP without having a transport.");
+            return;
+        }
+        let mut sctp_buffer = RefCell::borrow_mut(&self.stream);
+        sctp_buffer.read_queue.push_back(message);
+        if let Some(waker) = &self.poll_waker { waker.wake_by_ref(); }
     }
 }
 
-impl Stream for MediaChannelApplication {
-    type Item = MediaChannelApplicationEvent;
+impl Stream for ChannelApplication {
+    type Item = ApplicationChannelEvent;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.poll_waker = None;
@@ -575,8 +546,10 @@ impl Stream for MediaChannelApplication {
 
         /* write all pending packets */
         while let Some(buffer) = RefCell::borrow_mut(&self.stream).write_queue.pop_front() {
-            if let Err(err) = self.ice_control.send(RTCTransportControl::SendMessage(buffer)) {
-                eprintln!("failed to send sctp data to ice: {}", err);
+            if let Some(ice_control) = &self.transport {
+                let _ = ice_control.send(RTCTransportControl::SendMessage(buffer));
+            } else {
+                eprintln!("Tried to send SCTP packet without having a valid ice connection");
             }
         }
 

@@ -207,7 +207,7 @@ unsafe extern "C" fn usrsctp_write_callback(
             let buffer = ptr::slice_from_raw_parts_mut(buffer as *mut u8, length).as_mut().unwrap();
             socket.callback_write(buffer);
         } else {
-            panic!("usrsctp_write_callback called with an invalid socket");
+            /* may be called on usrsctp_close */
         }
     });
 

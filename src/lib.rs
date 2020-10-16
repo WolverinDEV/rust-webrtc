@@ -9,6 +9,7 @@ pub mod transport;
 pub mod sctp;
 pub mod srtp2;
 pub mod utils;
+pub mod application;
 
 pub fn initialize_webrtc() {
     // unsafe { libnice::sys::nice_debug_enable(1); }

@@ -1,4 +1,4 @@
-use std::io::{ Cursor, Error, ErrorKind, Result };
+use std::io::{ Cursor, Result };
 use byteorder::ReadBytesExt;
 use std::fmt::Debug;
 use serde::export::Formatter;
