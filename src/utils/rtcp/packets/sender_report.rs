@@ -1,6 +1,7 @@
 use crate::utils::rtcp::{RtcpReportBlock, read_profile_data, profile_data_length, RtcpPacketType, write_profile_data};
 use std::io::{Cursor, Result, ErrorKind, Error};
 use byteorder::{ReadBytesExt, BigEndian, WriteBytesExt};
+use std::collections::BTreeMap;
 
 /// https://tools.ietf.org/html/rfc1889#section-6.3.1
 #[derive(Debug, Clone)]
@@ -11,7 +12,7 @@ pub struct RtcpPacketSenderReport {
     pub packet_count: u32,
     pub byte_count: u32,
 
-    pub reports: Vec<RtcpReportBlock>,
+    pub reports: BTreeMap<u32, RtcpReportBlock>,
     pub profile_data: Option<Vec<u8>>
 }
 
@@ -38,12 +39,13 @@ impl RtcpPacketSenderReport {
             rtp_timestamp,
             packet_count,
             byte_count,
-            reports: Vec::new(),
+            reports: BTreeMap::new(),
             profile_data: None
         };
-        report.reports.reserve((info & 0x3F) as usize);
+
         for _ in 0..(info & 0x3F) as usize {
-            report.reports.push(RtcpReportBlock::parse(reader)?);
+            let ssrc = reader.read_u32::<BigEndian>()?;
+            report.reports.insert(ssrc, RtcpReportBlock::parse(reader)?);
         }
 
         let bytes_read = report.byte_size();
@@ -56,7 +58,7 @@ impl RtcpPacketSenderReport {
     }
 
     pub fn byte_size(&self) -> usize {
-        7 * 4 + self.reports.iter().map(|e| e.byte_size()).sum::<usize>() + profile_data_length(&self.profile_data)
+        7 * 4 + self.reports.iter().map(|e| 4 + e.1.byte_size()).sum::<usize>() + profile_data_length(&self.profile_data)
     }
 
     pub fn write(&self, writer: &mut Cursor<&mut [u8]>) -> Result<()> {
@@ -74,7 +76,7 @@ impl RtcpPacketSenderReport {
         writer.write_u8(info as u8)?;
         writer.write_u8(RtcpPacketType::SenderReport.value())?;
 
-        let mut quad_size = 6 + self.reports.iter().map(|e| e.quad_byte_size()).sum::<usize>();
+        let mut quad_size = 6 + self.reports.iter().map(|e| 1 + e.1.quad_byte_size()).sum::<usize>();
         if let Some(payload) = &self.profile_data {
             quad_size += (payload.len() + 3) / 4;
         }
@@ -87,7 +89,8 @@ impl RtcpPacketSenderReport {
         writer.write_u32::<BigEndian>(self.byte_count)?;
 
         for report in self.reports.iter() {
-            report.write(writer)?;
+            writer.write_u32::<BigEndian>(*report.0)?;
+            report.1.write(writer)?;
         }
 
         write_profile_data(writer, &self.profile_data, true)?;
@@ -101,7 +104,7 @@ mod test {
 
     use crate::utils::rtcp::packets::RtcpPacketSenderReport;
     use std::io::Cursor;
-    use crate::utils::rtcp::RtcpReportBlock;
+    use std::collections::BTreeMap;
 
     const SENDER_SSRC: u32 = 0x12345678;
     const REMOTE_SSRC: u32 = 0x23456789;
@@ -133,7 +136,7 @@ mod test {
             rtp_timestamp: RTP_TIMESTAMP,
             network_timestamp: NETWORK_TIMESTAMP,
             profile_data: None,
-            reports: vec![]
+            reports: BTreeMap::new()
         }
     }
 

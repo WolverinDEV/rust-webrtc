@@ -1,12 +1,13 @@
 use crate::utils::rtcp::{RtcpReportBlock, read_profile_data, profile_data_length, RtcpPacketType, write_profile_data};
 use std::io::{Cursor, Result, ErrorKind, Error};
 use byteorder::{ReadBytesExt, BigEndian, WriteBytesExt};
+use std::collections::BTreeMap;
 
 ///https://tools.ietf.org/html/rfc1889#section-6.3.2
 #[derive(Debug, Clone)]
 pub struct RtcpPacketReceiverReport {
     pub ssrc: u32,
-    pub reports: Vec<RtcpReportBlock>,
+    pub reports: BTreeMap<u32, RtcpReportBlock>,
     pub profile_data: Option<Vec<u8>>
 }
 
@@ -26,12 +27,13 @@ impl RtcpPacketReceiverReport {
 
         let mut report = RtcpPacketReceiverReport{
             ssrc: sender_src,
-            reports: Vec::new(),
+            reports: BTreeMap::new(),
             profile_data: None
         };
-        report.reports.reserve((info & 0x3F) as usize);
+
         for _ in 0..(info & 0x3F) as usize {
-            report.reports.push(RtcpReportBlock::parse(reader)?);
+            let ssrc = reader.read_u32::<BigEndian>()?;
+            report.reports.insert(ssrc, RtcpReportBlock::parse(reader)?);
         }
 
         let bytes_read = report.byte_size();
@@ -44,7 +46,7 @@ impl RtcpPacketReceiverReport {
     }
 
     pub fn byte_size(&self) -> usize {
-        8 + self.reports.iter().map(|e| e.byte_size()).sum::<usize>() + profile_data_length(&self.profile_data)
+        8 + self.reports.iter().map(|e| e.1.byte_size() + 4).sum::<usize>() + profile_data_length(&self.profile_data)
     }
 
     pub fn write(&self, writer: &mut Cursor<&mut [u8]>) -> Result<()> {
@@ -62,7 +64,7 @@ impl RtcpPacketReceiverReport {
         writer.write_u8(info as u8)?;
         writer.write_u8(RtcpPacketType::ReceiverReport.value())?;
 
-        let mut quad_size = 1 + self.reports.iter().map(|e| e.quad_byte_size()).sum::<usize>();
+        let mut quad_size = 1 + self.reports.iter().map(|e| 1 + e.1.quad_byte_size()).sum::<usize>();
         if let Some(payload) = &self.profile_data {
             quad_size += (payload.len() + 3) / 4;
         }
@@ -70,7 +72,8 @@ impl RtcpPacketReceiverReport {
 
         writer.write_u32::<BigEndian>(self.ssrc)?;
         for report in self.reports.iter() {
-            report.write(writer)?;
+            writer.write_u32::<BigEndian>(*report.0)?;
+            report.1.write(writer)?;
         }
 
         write_profile_data(writer, &self.profile_data, true)?;
