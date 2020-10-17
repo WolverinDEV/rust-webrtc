@@ -5,11 +5,11 @@ use crate::utils::rtcp::RtcpPacket;
 use crate::transport::RTCTransportControl;
 use futures::task::{Context, Poll};
 use tokio::macros::support::Pin;
-use std::cell::RefCell;
 use crate::utils::{RtpPacketResendRequester, RtpPacketResendRequesterEvent};
 use crate::utils::rtcp::packets::{RtcpPacketTransportFeedback, RtcpTransportFeedback, RtcpPacketSenderReport, SourceDescription};
-use crate::media::{Codec, InternalMediaTrack, ControlDataSendError};
-use webrtc_sdp::attribute_type::SdpAttributeExtmap;
+use crate::media::{InternalMediaTrack, ControlDataSendError};
+use webrtc_sdp::media_type::SdpMedia;
+use std::collections::HashMap;
 
 /* TODO: When looking at extensions https://github.com/zxcpoiu/webrtc/blob/ea3dddf1d0880e89d84a7e502f65c65993d4169d/modules/rtp_rtcp/source/rtp_packet_received.cc#L50 */
 
@@ -87,6 +87,8 @@ impl MediaReceiver {
 pub(crate) struct InternalMediaReceiver {
     pub track: InternalMediaTrack,
 
+    pub properties: HashMap<String, Option<String>>,
+
     pub event_sender: mpsc::UnboundedSender<InternalReceiverEvent>,
     pub control_receiver: mpsc::UnboundedReceiver<InternalReceiverControl>,
 
@@ -104,6 +106,10 @@ impl InternalMediaReceiver {
     pub fn handle_source_description(&mut self, _description: &SourceDescription) {}
 
     pub fn handle_unknown_rtcp(&mut self, _data: &Vec<u8>) {}
+
+    pub fn parse_properties_from_sdp(&mut self, media: &SdpMedia) {
+        InternalMediaTrack::parse_properties_from_sdp(&mut self.properties, self.track.id, media);
+    }
 
     pub fn poll_control(&mut self, cx: &mut Context<'_>) {
         while let Poll::Ready(event) = self.resend_requester.poll_next_unpin(cx) {
@@ -131,13 +137,23 @@ impl InternalMediaReceiver {
         }
 
         while let Poll::Ready(message) = self.control_receiver.poll_next_unpin(cx) {
-            match message.expect("unexpected stream ending") {
-                InternalReceiverControl::SendRtcpPacket(packet) => {
-                    let _ = self.track.transport.send(RTCTransportControl::SendRtcpMessage(packet));
-                },
-                InternalReceiverControl::ResetPendingResends => {
-                    self.resend_requester.reset_resends();
-                }
+            self.handle_control_message(message.expect("unexpected stream ending"));
+        }
+    }
+
+    pub fn flush_control(&mut self) {
+        while let Ok(message) = self.control_receiver.try_recv() {
+            self.handle_control_message(message);
+        }
+    }
+
+    fn handle_control_message(&mut self, message: InternalReceiverControl) {
+        match message {
+            InternalReceiverControl::SendRtcpPacket(packet) => {
+                let _ = self.track.transport.send(RTCTransportControl::SendRtcpMessage(packet));
+            },
+            InternalReceiverControl::ResetPendingResends => {
+                self.resend_requester.reset_resends();
             }
         }
     }

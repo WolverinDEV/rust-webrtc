@@ -3,7 +3,7 @@ use std::io::{Cursor, Result, ErrorKind, Error, Read, Write};
 use byteorder::{ReadBytesExt, BigEndian, WriteBytesExt};
 use std::fmt::{Debug};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub enum RtcpPayloadFeedback {
     PictureLossIndication,
     //SliceLossIndication,

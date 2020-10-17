@@ -32,7 +32,7 @@ async function connect() {
 }
 
 type ReceivedMessage<T extends keyof WebCommand> = { type: T, payload: WebCommand[T] };
-function handleMessage(data: any) {
+async function handleMessage(data: any) {
     const message = JSON.parse(data) as ReceivedMessage<keyof WebCommand>;
 
     switch (message.type) {
@@ -49,16 +49,21 @@ function handleMessage(data: any) {
         case "RtcSetRemoteDescription": {
             const payload = message.payload as WebCommand["RtcSetRemoteDescription"];
             if(!peer) { throw "Missing peer"; }
-            if(payload.mode !== "answer") { throw "invalid description mode"; }
 
             let sdp = payload.sdp.replace("\r\n\r\n", "\r\n");
-            console.log("[SDP] Answer:\n%s", sdp);
+            console.log("[SDP] %s:\n%s", payload.mode, sdp);
             peer.setRemoteDescription(new RTCSessionDescription({
                 sdp: sdp.replace(/\r?\n\r?\n/g, "\n"),
-                type: "answer"
+                type: payload.mode
             })).catch(error => {
                 console.error("Failed to apply answer: %o", error);
             });
+            if(payload.mode === "offer") {
+                let answer = await peer.createAnswer();
+                await peer.setLocalDescription(answer);
+                console.log("[SDP] Sending answer:\n%s", answer.sdp);
+                sendCommand("RtcSetRemoteDescription", { sdp: answer.sdp, mode: "answer" });
+            }
             break;
         }
 
@@ -148,6 +153,12 @@ async function initializePeerVideo(peer: RTCPeerConnection) {
     let sender = peer.addTrack(stream.getVideoTracks()[0]);
     showVideoStream(stream);
 
+    /*
+    setTimeout(() => {
+        peer.addTrack(stream.getVideoTracks()[0].clone());
+    }, 5000);
+    */
+    /*
     setTimeout(() => {
         console.log("Removing sender");
         peer.removeTrack(sender);
@@ -168,6 +179,7 @@ async function initializePeerVideo(peer: RTCPeerConnection) {
             }, 5000);
         }, 5000);
     }, 5000);
+    */
     /*
     setTimeout(() => {
         const clone = stream.getVideoTracks()[0].clone();
@@ -275,7 +287,6 @@ async function initializePeer() {
 
     console.log("[SDP] Offer:\n%s", offer.sdp);
     sendCommand("RtcSetRemoteDescription", { sdp: offer.sdp, mode: "offer" });
-    console.error(offer);
 
     /* if something changes, signal it to the remote */
     peer.onnegotiationneeded = async () => {
@@ -289,7 +300,6 @@ async function initializePeer() {
 
         console.log("[SDP] Offer:\n%s", offer.sdp);
         sendCommand("RtcSetRemoteDescription", { sdp: offer.sdp, mode: "offer" });
-        console.error(offer);
     }
 }
 

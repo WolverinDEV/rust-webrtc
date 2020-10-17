@@ -1,10 +1,7 @@
-use crate::application::ChannelApplication;
 use std::collections::HashMap;
 use webrtc_sdp::attribute_type::{SdpAttributeType, SdpAttribute, SdpAttributeSsrc, SdpAttributeRtcpFbType, SdpAttributeFmtpParameters, SdpAttributeRtpmap, SdpAttributePayloadType, SdpAttributeRtcpFb, SdpAttributeFmtp};
 use std::fmt::{Formatter, Debug};
 use webrtc_sdp::error::SdpParserInternalError;
-use crate::utils::rtp::ParsedRtpPacket;
-use crate::utils::rtcp::RtcpPacket;
 use webrtc_sdp::media_type::SdpMedia;
 
 mod media_line;
@@ -19,6 +16,15 @@ use tokio::sync::mpsc;
 use crate::transport::RTCTransportControl;
 use std::io::Error;
 
+#[derive(Debug, PartialEq, Copy, Clone)]
+pub enum NegotiationState {
+    None,
+    Changed,
+    Propagated,
+    Negotiated
+}
+
+#[derive(Debug)]
 pub enum ControlDataSendError {
     BuildFailed(Error),
     SendFailed
@@ -28,36 +34,34 @@ pub enum ControlDataSendError {
 pub(crate) struct InternalMediaTrack {
     pub id: u32,
     pub media_line: u32,
-    pub properties: HashMap<String, Option<String>>,
 
     pub transport_id: u32,
     pub transport: mpsc::UnboundedSender<RTCTransportControl>,
 }
 
 impl InternalMediaTrack {
-    pub fn parse_properties_from_sdp(&mut self, media: &SdpMedia) {
+    pub fn parse_properties_from_sdp(properties: &mut HashMap<String, Option<String>>, id: u32, media: &SdpMedia) {
         /* TODO: Test if the properties have changed */
-        let id = self.id;
-        self.properties.clear();
+        properties.clear();
         for attribute in media.get_attributes_of_type(SdpAttributeType::Ssrc)
             .iter()
             .map(|e| if let SdpAttribute::Ssrc(data) = e { data } else { panic!() })
             .filter(|e| e.id == id && e.attribute.is_some()) {
-            self.properties.insert(attribute.attribute.as_ref().unwrap().clone(), attribute.value.clone());
+            properties.insert(attribute.attribute.as_ref().unwrap().clone(), attribute.value.clone());
         }
     }
 
-    pub fn write_sdp(&self, media: &mut SdpMedia) {
-        if self.properties.is_empty() {
+    pub fn write_sdp(properties: &HashMap<String, Option<String>>, id: u32, media: &mut SdpMedia) {
+        if properties.is_empty() {
             media.add_attribute(SdpAttribute::Ssrc(SdpAttributeSsrc {
-                id: self.id,
+                id,
                 value: None,
                 attribute: None
             })).expect("failed to add ssrc");
         } else {
-            for (key, value) in self.properties.iter() {
+            for (key, value) in properties.iter() {
                 media.add_attribute(SdpAttribute::Ssrc(SdpAttributeSsrc {
-                    id: self.id,
+                    id,
                     value: value.clone(),
                     attribute: Some(key.clone())
                 })).expect("failed to add ssrc");

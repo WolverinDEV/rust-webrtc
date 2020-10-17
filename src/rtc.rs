@@ -2,7 +2,6 @@
 
 use glib::{MainContext, BoolError};
 use webrtc_sdp::media_type::{SdpMediaValue, SdpMedia};
-use std::sync::{Arc, Mutex};
 use webrtc_sdp::attribute_type::{SdpAttributeType, SdpAttribute, SdpAttributeSetup, SdpAttributeGroup, SdpAttributeGroupSemantic};
 use std::fmt::Debug;
 use futures::{FutureExt, StreamExt};
@@ -11,19 +10,18 @@ use futures::task::{Context, Poll};
 use tokio::macros::support::Pin;
 use std::rc::Rc;
 use std::cell::{RefCell, RefMut};
-use crate::media;
-use std::collections::{HashMap, BTreeMap, VecDeque};
-use crate::transport::{RTCTransport, RTCTransportInitializeError, ICECredentials, RTCTransportEvent, RTCTransportICECandidateAddError};
-use webrtc_sdp::{SdpSession, SdpOrigin, SdpTiming, SdpConnection};
+use std::collections::{HashMap, BTreeMap};
+use crate::transport::{RTCTransport, RTCTransportInitializeError, ICECredentials, RTCTransportEvent, RTCTransportICECandidateAddError, RTCTransportState};
+use webrtc_sdp::{SdpSession, SdpOrigin, SdpTiming};
 use webrtc_sdp::address::ExplicitlyTypedAddress;
 use std::net::{IpAddr, Ipv4Addr};
 use libnice::ffi::{NiceCompatibility, NiceAgentProperty};
 use libnice::sys::NiceAgentOption_NICE_AGENT_OPTION_ICE_TRICKLE;
 use crate::application::{ChannelApplication, DataChannel, ApplicationChannelEvent};
-use crate::media::{MediaLine, MediaLineParseError, InternalMediaReceiver, MediaReceiverEvent, MediaReceiver, InternalMediaSender, InternalMediaTrack, MediaSender};
+use crate::media::{MediaLine, MediaLineParseError, InternalMediaReceiver, MediaReceiver, InternalMediaSender, InternalMediaTrack, MediaSender, NegotiationState};
 use crate::utils::rtp::ParsedRtpPacket;
 use crate::utils::rtcp::RtcpPacket;
-use std::ops::{DerefMut, Deref};
+use std::ops::{DerefMut};
 use tokio::sync::mpsc;
 use crate::utils::RtpPacketResendRequester;
 use crate::sctp::message::DataChannelType;
@@ -33,9 +31,10 @@ use crate::sctp::message::DataChannelType;
 pub const ACT_PASS_DEFAULT_SETUP_TYPE: SdpAttributeSetup = SdpAttributeSetup::Passive;
 
 pub enum PeerConnectionEvent {
+    NegotiationNeeded,
     LocalIceCandidate(Option<Candidate>, u32),
-    ReceivedRemoteStream(MediaReceiver),
 
+    ReceivedRemoteStream(MediaReceiver),
     ReceivedDataChannel(DataChannel),
 
     UnassignableRtcpPacket(RtcpPacket),
@@ -58,8 +57,24 @@ pub enum PeerConnectionState {
     Failed
 }
 
+#[derive(Debug, PartialEq)]
+pub enum SignallingState {
+    /// Nothing has been negotiated
+    None,
+    /// A local offer has been created, awaiting the remote answer.
+    /// When being in this state, no modifications to the streams are allowed.
+    HaveLocalOffer,
+    /// Received a remote offer, awaiting the own answer to be generated
+    HaveRemoteOffer,
+    /// Everything has been negotiated
+    Negotiated,
+    /// Everything has been negotiated, but something changed
+    NegotiationRequired
+}
+
 pub struct PeerConnection {
     state: PeerConnectionState,
+    signalling_state: SignallingState,
 
     ice_agent: libnice::ice::Agent,
     transport: BTreeMap<u32, Rc<RefCell<RTCTransport>>>,
@@ -81,6 +96,8 @@ pub struct PeerConnection {
 
 #[derive(Debug)]
 pub enum RemoteDescriptionApplyError {
+    InvalidNegotiationState,
+
     UnsupportedMode,
     UnsupportedMediaType{ media_index: usize },
     InvalidSdp{ reason: String },
@@ -99,7 +116,8 @@ pub enum RemoteDescriptionApplyError {
     MediaChannelConfigure{ error: String },
     IceInitializeError{ result: RTCTransportInitializeError, media_id: u32 },
     MixedIceSetupStates{ },
-    IceSetupUnsupported{ media_index: usize }
+    IceSetupUnsupported{ media_index: usize },
+    MissMatchingIceSettings{ media_index: u32 },
 }
 
 #[derive(Debug)]
@@ -108,7 +126,9 @@ pub enum CreateAnswerError {
     DescribeError(u32),
 
     MissingTransportChannel(u32),
-    InternalError(String)
+    InternalError(String),
+
+    InvalidNegotiationState
 }
 
 macro_rules! get_attribute_value {
@@ -119,57 +139,11 @@ macro_rules! get_attribute_value {
     }
 }
 
-/*
-v=0
-o=- 5007946851132490 2 IN IP4 0.0.0.0
-s=-
-t=0 0
-a=group:BUNDLE 0 1 2
-a=msid-semantic: WMS DataPipes
-
-m=audio 9 UDP/TLS/RTP/SAVPF 111
-c=IN IP4 0.0.0.0
-a=recvonly
-a=mid:0
-a=rtcp-mux
-a=extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level
-a=rtpmap:111 opus/48000/2
-a=fmtp:111 minptime=10;useinbandfec=1
-a=fingerprint:sha-256 F4:00:69:82:EB:B7:E2:08:F7:82:99:9D:AA:C4:95:E8:F9:9D:25:F9:05:84:2C:EA:2D:58:11:1D:22:28:7B:E8
-a=setup:active
-a=ice-ufrag:jP6v
-a=ice-pwd:bVKJaGwHIpBfRVzG/XqBCH
-a=ice-options:trickle
-m=audio 9 UDP/TLS/RTP/SAVPF 111
-
-c=IN IP4 0.0.0.0
-a=recvonly
-a=mid:1
-a=rtcp-mux
-a=extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level
-a=rtpmap:111 opus/48000/2
-a=fmtp:111 minptime=10;useinbandfec=1
-a=fingerprint:sha-256 F4:00:69:82:EB:B7:E2:08:F7:82:99:9D:AA:C4:95:E8:F9:9D:25:F9:05:84:2C:EA:2D:58:11:1D:22:28:7B:E8
-a=setup:active
-a=ice-ufrag:jP6v
-a=ice-pwd:bVKJaGwHIpBfRVzG/XqBCH
-a=ice-options:trickle
-m=application 9 DTLS/SCTP 5000
-
-c=IN IP4 0.0.0.0
-a=mid:2
-a=sctpmap:5000 webrtc-datachannel 1024
-a=fingerprint:sha-256 F4:00:69:82:EB:B7:E2:08:F7:82:99:9D:AA:C4:95:E8:F9:9D:25:F9:05:84:2C:EA:2D:58:11:1D:22:28:7B:E8
-a=setup:active
-a=ice-ufrag:jP6v
-a=ice-pwd:bVKJaGwHIpBfRVzG/XqBCH
-a=ice-options:trickle
- */
-
 impl PeerConnection {
     pub fn new(event_loop: MainContext) -> Self {
         let mut connection = PeerConnection{
             state: PeerConnectionState::New,
+            signalling_state: SignallingState::None,
 
             /* "-" indicates no username */
             origin_username: String::from("-"),
@@ -204,10 +178,17 @@ impl PeerConnection {
         &self.media_lines
     }
 
-    pub fn set_remote_description(&mut self, description: &webrtc_sdp::SdpSession, mode: RtcDescriptionType) -> Result<(), RemoteDescriptionApplyError> {
-        if mode != RtcDescriptionType::Offer {
-            return Err(RemoteDescriptionApplyError::UnsupportedMode);
+    pub fn set_remote_description(&mut self, description: &webrtc_sdp::SdpSession, mode: &RtcDescriptionType) -> Result<(), RemoteDescriptionApplyError> {
+        if mode == &RtcDescriptionType::Offer {
+            if !matches!(&self.signalling_state, &SignallingState::None | &SignallingState::Negotiated) {
+                return Err(RemoteDescriptionApplyError::InvalidNegotiationState);
+            }
+        } else {
+            if !matches!(&self.signalling_state, &SignallingState::HaveLocalOffer) {
+                return Err(RemoteDescriptionApplyError::InvalidNegotiationState);
+            }
         }
+
         if self.media_lines.len() > description.media.len() {
             return Err(RemoteDescriptionApplyError::MissingMediaLines);
         }
@@ -215,7 +196,6 @@ impl PeerConnection {
         /* copy the origin username and send it back, required for mozilla for example */
         self.origin_username = description.origin.username.clone();
 
-        println!("Desk: {:}", description);
         for media_line in 0..description.media.len() {
             let media = &description.media[media_line as usize];
 
@@ -234,13 +214,25 @@ impl PeerConnection {
                 }
             }?;
 
-            /* TODO: Don't (may) create a channel here if we already know the media line */
-            let ice_channel = self.create_ice_channel(&credentials, media_line as u32, local_setup)?;
-            let mut ice_channel_mut = RefCell::borrow_mut(&ice_channel);
             if let Some(line) = self.media_lines.get(media_line) {
                 /* we've to update the line */
                 let line = line.clone();
                 let mut line = RefCell::borrow_mut(&line);
+
+                let transport = self.transport.get(&line.transport_id);
+                if transport.is_none() {
+                    return Err(RemoteDescriptionApplyError::InternalError { detail: String::from("missing transport for media line") });
+                }
+                let transport = Rc::clone(&transport.unwrap());
+                let mut transport = RefCell::borrow_mut(&transport);
+
+                if transport.remote_credentials != credentials {
+                    return Err(RemoteDescriptionApplyError::MissMatchingIceSettings{ media_index: media_line as u32 });
+                }
+
+                if format!("{}", &transport.setup) != format!("{}", &local_setup) {
+                    return Err(RemoteDescriptionApplyError::MissMatchingIceSettings{ media_index: media_line as u32 });
+                }
 
                 line.update_from_sdp(media)
                     .map_err(|err| RemoteDescriptionApplyError::MediaLineParseError { media_line: media_line as u32, error: err })?;
@@ -250,14 +242,13 @@ impl PeerConnection {
                         .map_err(|err| RemoteDescriptionApplyError::MediaChannelConfigure { error: err })?;
                 }
 
-                /* TODO: Validate ICE */
-                self.update_media_line_streams(media, line.deref_mut(), ice_channel_mut.deref_mut());
+                self.update_media_line_streams(media, line.deref_mut(), transport.deref_mut());
             } else {
+                let ice_channel = self.create_ice_channel(&credentials, media_line as u32, local_setup)?;
+                let mut ice_channel_mut = RefCell::borrow_mut(&ice_channel);
+
                 let mut line = MediaLine::new_from_sdp(media_line as u32, media)
                     .map_err(|err| RemoteDescriptionApplyError::MediaLineParseError { media_line: media_line as u32, error: err })?;
-
-                /* yeah we have a new line */
-                println!("Remote credentials: {:?}", &credentials);
 
                 if ice_channel_mut.owning_media_line == media_line as u32 {
                     /* yeah it's our channel */
@@ -290,7 +281,8 @@ impl PeerConnection {
                 ice_channel_mut.media_lines.push(line.index);
 
                 if line.media_type == SdpMediaValue::Application {
-                    self.application_channel.set_remote_description(media);
+                    self.application_channel.set_remote_description(media)
+                        .map_err(|err| RemoteDescriptionApplyError::InternalError { detail: String::from(format!("failed to set remote description: {:?}", err)) })?;
                     self.application_channel.transport = Some(ice_channel_mut.control_sender.clone());
                     /* TODO: Trigger the handle_transport_initialized event if the transport has already been initialized */
                     //self.application_channel.handle_transport_initialized();
@@ -299,6 +291,24 @@ impl PeerConnection {
                 self.update_media_line_streams(media, &mut line, ice_channel_mut.deref_mut());
                 self.media_lines.push(Rc::new(RefCell::new(line)));
             }
+        }
+
+        match &self.signalling_state {
+            &SignallingState::HaveLocalOffer => {
+                for line in self.media_lines.iter() {
+                    let mut line = RefCell::borrow_mut(line);
+                    if line.negotiation_state == NegotiationState::Propagated {
+                        line.negotiation_state = NegotiationState::Negotiated;
+                    }
+                }
+
+                self.signalling_state = SignallingState::Negotiated;
+            },
+            &SignallingState::None |
+            &SignallingState::Negotiated => {
+                self.signalling_state = SignallingState::HaveRemoteOffer;
+            },
+            _ => panic!()
         }
 
         Ok(())
@@ -331,7 +341,6 @@ impl PeerConnection {
                 track: InternalMediaTrack {
                     id: *receiver_id,
                     media_line: media_line.index,
-                    properties: HashMap::new(),
 
                     transport_id: media_line.transport_id,
                     transport: transport.control_sender.clone(),
@@ -340,11 +349,13 @@ impl PeerConnection {
                 event_sender: tx,
                 control_receiver: crx,
 
+                properties: HashMap::new(),
+
                 resend_requester: RtpPacketResendRequester::new(),
             };
-            internal_receiver.track.parse_properties_from_sdp(media);
+            internal_receiver.parse_properties_from_sdp(media);
 
-            let mut receiver = MediaReceiver {
+            let receiver = MediaReceiver {
                 id: *receiver_id,
                 media_line: media_line.index,
 
@@ -358,6 +369,10 @@ impl PeerConnection {
     }
 
     pub fn create_local_description(&mut self) -> Result<SdpSession, CreateAnswerError> {
+        if matches!(&self.signalling_state, &SignallingState::HaveLocalOffer | &SignallingState::Negotiated) {
+            return Err(CreateAnswerError::InvalidNegotiationState);
+        }
+
         let mut answer = SdpSession::new(0, SdpOrigin {
             session_id: rand::random(),
             session_version: 2,
@@ -372,6 +387,8 @@ impl PeerConnection {
             tags: self.media_lines.iter().map(|e| RefCell::borrow(e).id.clone()).collect::<Vec<String>>()
         })).unwrap();
 
+        /* flush all pending stream modifications */
+        self.flush_transceiver_control();
         for media_line in self.media_lines.iter() {
             let media_line = RefCell::borrow(media_line);
             let mut media = {
@@ -379,7 +396,8 @@ impl PeerConnection {
                     let mut media = self.application_channel.generate_local_description()
                         .map_err(|err| CreateAnswerError::InternalError(err))?;
 
-                    media.add_attribute(SdpAttribute::Mid(media_line.id.clone()));
+                    media.add_attribute(SdpAttribute::Mid(media_line.id.clone()))
+                        .unwrap();
                     media
                 } else {
                     let mut media = media_line.generate_local_description()
@@ -387,8 +405,8 @@ impl PeerConnection {
 
                     for sender in self.stream_sender.values()
                         .filter(|sender| RefCell::borrow(sender).track.media_line == media_line.index) {
-                        let sender = RefCell::borrow(sender);
-                        sender.track.write_sdp(&mut media);
+                        let mut sender = RefCell::borrow_mut(sender);
+                        sender.write_sdp(&mut media);
                     }
 
                     media
@@ -408,6 +426,28 @@ impl PeerConnection {
             media.add_attribute(SdpAttribute::Setup(ice_channel.setup.clone())).unwrap();
 
             answer.media.push(media);
+        }
+
+        match &self.signalling_state {
+            &SignallingState::None |
+            &SignallingState::NegotiationRequired => {
+                for line in self.media_lines.iter() {
+                    let mut line = RefCell::borrow_mut(line);
+                    if line.negotiation_state == NegotiationState::Changed ||
+                        line.negotiation_state == NegotiationState::None {
+                        line.negotiation_state = NegotiationState::Propagated;
+                    }
+                }
+                self.signalling_state = SignallingState::HaveLocalOffer;
+            },
+            &SignallingState::HaveRemoteOffer => {
+                for line in self.media_lines.iter() {
+                    let mut line = RefCell::borrow_mut(line);
+                    line.negotiation_state = NegotiationState::Negotiated;
+                }
+                self.signalling_state = SignallingState::Negotiated;
+            }
+            _ => panic!() /* this other cases should never happen, they're already caught in the first few lines */
         }
 
         Ok(answer)
@@ -437,30 +477,16 @@ impl PeerConnection {
         let media_line = self.allocate_sender_media_line(media_type);
         let mut media_line = RefCell::borrow_mut(&media_line);
 
-        let (tx, rx) = mpsc::unbounded_channel();
-        let (ctx, crx) = mpsc::unbounded_channel();
-        let mut internal_sender = InternalMediaSender {
-            track: InternalMediaTrack {
+        let (internal_sender, sender) = InternalMediaSender::new(
+            InternalMediaTrack {
                 /* TODO: Ensure this hasn't been used already */
                 id: rand::random::<u32>(),
                 media_line: media_line.index,
-                properties: HashMap::new(),
 
                 transport_id: media_line.transport_id,
                 transport: RefCell::borrow(self.transport.get(&media_line.transport_id).expect("missing transport")).control_sender.clone(),
-            },
-
-            events: tx,
-            control: Some(crx)
-        };
-        /* A channel name is required so we add one */
-        internal_sender.track.properties.insert(String::from("cname"), Some(String::from(format!("{}", internal_sender.track.id))));
-
-        let sender = MediaSender {
-            control: ctx,
-            events: rx,
-            id: internal_sender.track.id
-        };
+            }
+        );
 
         /* TODO: Trigger renegotiation */
         media_line.local_streams.push(internal_sender.track.id);
@@ -537,8 +563,15 @@ impl PeerConnection {
             RTCTransportEvent::LocalIceGatheringFinished() => {
                 return Some(PeerConnectionEvent::LocalIceCandidate(None, ice.owning_media_line));
             },
-            RTCTransportEvent::DtlsInitialized() => {
-                self.application_channel.handle_transport_initialized();
+            RTCTransportEvent::TransportStateChanged => {
+                /* TODO: Propagate state changes from Connected to any thing else to the streams */
+                println!("Transport state change to {:?}", ice.state());
+                match ice.state() {
+                    &RTCTransportState::Connected => {
+                        self.application_channel.handle_transport_connected();
+                    },
+                    _ => {}
+                }
                 None
             },
             RTCTransportEvent::MessageReceivedDtls(message) => {
@@ -582,11 +615,12 @@ impl PeerConnection {
                             */
 
                             match packet {
-                                RtcpPacket::ReceiverReport(rr) => {
-                                    if let Some(sender) = self.stream_sender.get(&rr.ssrc) {
-                                        RefCell::borrow_mut(sender).handle_receiver_report(rr);
-                                    } else {
-                                        let _ = self.local_events.0.send(PeerConnectionEvent::UnassignableRtcpPacket(RtcpPacket::ReceiverReport(rr)));
+                                RtcpPacket::ReceiverReport(mut rr) => {
+                                    let app_data = rr.profile_data.take();
+                                    for (id, report) in rr.reports {
+                                        if let Some(sender) = self.stream_sender.get(&id) {
+                                            RefCell::borrow_mut(sender).handle_receiver_report(report, &app_data);
+                                        }
                                     }
                                 },
                                 RtcpPacket::SenderReport(sr) => {
@@ -666,6 +700,26 @@ impl PeerConnection {
         }
 
     }
+
+    fn poll_transceiver_control(&mut self, cx: &mut Context<'_>) {
+        for receiver in self.stream_receiver.values() {
+            RefCell::borrow_mut(receiver).poll_control(cx);
+        }
+
+        for sender in self.stream_sender.values() {
+            RefCell::borrow_mut(sender).poll_control(cx);
+        }
+    }
+
+    fn flush_transceiver_control(&mut self) {
+        for receiver in self.stream_receiver.values() {
+            RefCell::borrow_mut(receiver).flush_control();
+        }
+
+        for sender in self.stream_sender.values() {
+            RefCell::borrow_mut(sender).flush_control();
+        }
+    }
 }
 
 unsafe impl Send for PeerConnection {}
@@ -678,13 +732,7 @@ impl futures::stream::Stream for PeerConnection {
             return Poll::Ready(Some(message.expect("unexpected local event stream close")));
         }
 
-        for receiver in self.stream_receiver.values() {
-            RefCell::borrow_mut(receiver).poll_control(cx);
-        }
-
-        for receiver in self.stream_sender.values() {
-            RefCell::borrow_mut(receiver).poll_control(cx);
-        }
+        self.poll_transceiver_control(cx);
 
         while let Poll::Ready(event) = self.application_channel.poll_next_unpin(cx) {
             let event = event.expect("unexpected stream end");
@@ -692,7 +740,7 @@ impl futures::stream::Stream for PeerConnection {
                 ApplicationChannelEvent::DataChannelReceived(channel) => {
                     return Poll::Ready(Some(PeerConnectionEvent::ReceivedDataChannel(channel)));
                 },
-                ApplicationChannelEvent::StateChanged { new_state } => {
+                ApplicationChannelEvent::StateChanged { new_state: _ } => {
                     /* TODO: Track the application channel state */
                 }
             }
@@ -714,6 +762,17 @@ impl futures::stream::Stream for PeerConnection {
         }
 
         let _ = self.ice_agent.poll_unpin(cx);
+
+        if self.signalling_state == SignallingState::Negotiated {
+            if self.media_lines.iter()
+                .find(|e| matches!(RefCell::borrow(e).negotiation_state(), NegotiationState::None | NegotiationState::Changed))
+                .is_some() {
+
+                self.signalling_state = SignallingState::NegotiationRequired;
+                return Poll::Ready(Some(PeerConnectionEvent::NegotiationNeeded));
+            }
+        }
+
         Poll::Pending
     }
 }

@@ -9,30 +9,36 @@ use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use webrtc_sdp::parse_sdp;
 use webrtc_sdp::attribute_type::{SdpAttribute};
 use std::sync::{Arc, Mutex};
-use std::ops::DerefMut;
+use std::ops::{DerefMut, Deref};
 use std::str::FromStr;
 use futures::task::{Poll};
 use tokio::sync::mpsc;
 use web_test::{rtc, initialize_webrtc};
 use web_test::rtc::{PeerConnection, PeerConnectionEvent, RtcDescriptionType};
-use web_test::media::{MediaSender, MediaReceiverEvent};
+use web_test::media::{MediaSender, MediaReceiverEvent, Codec, MediaSenderEvent};
 use crate::shared::gio::MAIN_GIO_EVENT_LOOP;
 use crate::shared::ws::{WebCommand, Client, ClientEvents};
 use rtp_rs::Seq;
 use webrtc_sdp::media_type::SdpMediaValue;
 use std::cell::RefCell;
 use web_test::application::{DataChannelEvent, DataChannelMessage};
-use web_test::sctp::message::DataChannelType;
+use web_test::utils::rtcp::RtcpPacket;
+use web_test::utils::rtcp::packets::{RtcpPacketPayloadFeedback, RtcpPayloadFeedback};
 
 mod shared;
 mod video;
+
+struct VideoSender {
+    sender: MediaSender,
+    request_pli: bool
+}
 
 struct ClientData {
     event_loop: Option<glib::MainLoop>,
     peer: Option<Arc<Mutex<rtc::PeerConnection>>>,
     command_pipe: (mpsc::UnboundedSender<WebCommand>, mpsc::UnboundedReceiver<WebCommand>),
 
-    video_sender: Arc<Mutex<Option<MediaSender>>>
+    video_sender: Arc<Mutex<Option<VideoSender>>>
 }
 
 impl Default for ClientData {
@@ -83,6 +89,7 @@ fn spawn_client_peer(client: &mut Client<ClientData>) {
 
     let tx = client.data.command_pipe.0.clone();
     let video_stream = client.data.video_sender.clone();
+    let mut command_pipe = client.data.command_pipe.0.clone();
     tokio::spawn(async move {
         /* This locks all other access */
         loop {
@@ -129,13 +136,22 @@ fn spawn_client_peer(client: &mut Client<ClientData>) {
                             let message = message.unwrap();
                             match message {
                                 MediaReceiverEvent::DataReceived(packet) => {
-                                    println!("Remote stream {} received RTP data {}", receiver.id, packet.payload().len());
+                                    //println!("Remote stream {} received RTP data {}", receiver.id, packet.payload().len());
                                     if let Some(stream) = video_stream.lock().unwrap().deref_mut() {
                                         let builder = packet.create_builder()
-                                            .ssrc(stream.id)
+                                            .ssrc(stream.sender.id)
                                             .sequence(Seq::from(unsafe { PACKET_ID = PACKET_ID.wrapping_add(1); PACKET_ID }));
 
-                                        stream.send_data(builder.build().unwrap());
+                                        stream.sender.send_data(builder.build().unwrap());
+                                        if stream.request_pli {
+                                            stream.request_pli = false;
+                                            receiver.reset_pending_resends();
+                                            receiver.send_control(RtcpPacket::PayloadFeedback(RtcpPacketPayloadFeedback{
+                                                ssrc: stream.sender.id,
+                                                media_ssrc: receiver.id,
+                                                feedback: RtcpPayloadFeedback::PictureLossIndication
+                                            }));
+                                        }
                                     }
                                 },
                                 _ => {
@@ -148,8 +164,9 @@ fn spawn_client_peer(client: &mut Client<ClientData>) {
                 PeerConnectionEvent::ReceivedDataChannel(channel) => {
                     println!("Received remote data channel: {}", channel.label());
 
-                    let channel = peer.lock().unwrap().create_data_channel(DataChannelType::Reliable, String::from(format!("reply - {}", channel.label())), None, 0).unwrap();
+                    //let channel = peer.lock().unwrap().create_data_channel(DataChannelType::Reliable, String::from(format!("reply - {}", channel.label())), None, 0).unwrap();
 
+                    let peer = peer.clone();
                     tokio::spawn(async move {
                         let mut channel = channel;
                         loop {
@@ -165,6 +182,9 @@ fn spawn_client_peer(client: &mut Client<ClientData>) {
                                 DataChannelEvent::MessageReceived(message) => {
                                     println!("Received dc message on {}: {:?}", channel.label(), message);
                                     if let DataChannelMessage::String(Some(text)) = message {
+                                        if text == "create" {
+                                            peer.lock().unwrap().add_media_sender(SdpMediaValue::Video);
+                                        }
                                         channel.send_text_message(Some(text));
                                     }
                                 },
@@ -176,7 +196,15 @@ fn spawn_client_peer(client: &mut Client<ClientData>) {
                     });
                 },
                 PeerConnectionEvent::UnassignableRtpPacket(_packet) => { },
-                PeerConnectionEvent::UnassignableRtcpPacket(_packet) => { }
+                PeerConnectionEvent::UnassignableRtcpPacket(_packet) => { },
+                PeerConnectionEvent::NegotiationNeeded => {
+                    println!("Negotiation needed");
+
+                    let mut peer = peer.lock().unwrap();
+                    if let Err(err) = send_local_description(&mut command_pipe, peer.deref_mut(), String::from("offer")) {
+                        eprintln!("Failed to send local description: {}", err);
+                    }
+                }
             }
         }
 
@@ -184,42 +212,66 @@ fn spawn_client_peer(client: &mut Client<ClientData>) {
     });
 }
 
+fn send_local_description(command_pipe: &mut mpsc::UnboundedSender<WebCommand>, peer: &mut PeerConnection, mode: String) -> std::result::Result<(), String> {
+    for line in peer.media_lines() {
+        let mut line = RefCell::borrow_mut(line);
+        if line.local_codecs().is_empty() && line.media_type != SdpMediaValue::Application {
+            line.register_local_codec(Codec{
+                payload_type: 96,
+                frequency: 90_000,
+                codec_name: String::from("VP8"),
+                feedback: vec![],
+                channels: None,
+                parameters: None
+            }).expect("failed to register local codec");
+        }
+    }
+
+    let answer = peer.create_local_description().map_err(|err| format!("{:?}", err))?;
+    println!("Answer: {:?}", answer.to_string());
+    let _ = command_pipe.send(WebCommand::RtcSetRemoteDescription { sdp: answer.to_string(), mode });
+    Ok(())
+}
+
 fn handle_command(client: &mut Client<ClientData>, command: &WebCommand) -> std::result::Result<(), String> {
     println!("Received web command: {:?}", command);
     match command {
         WebCommand::RtcSetRemoteDescription{ mode, sdp } => {
-            if mode != "offer" {
-                return Err(String::from("We only support rtp offers"));
-            }
-
             let sdp = parse_sdp(sdp.as_str(), false)
                 .map_err(|err| format!("failed to parse sdp: {:?}", err))?;
-            println!("Offer contains {} media streams", sdp.media.len());
+            println!("Offer/Answer contains {} media streams", sdp.media.len());
 
             if client.data.peer.is_none() {
                 spawn_client_peer(client);
             }
 
             let peer = client.data.peer.as_ref().expect("expected a peer");
-            let mut locked_peer = peer.lock().unwrap();
-            locked_peer.set_remote_description(&sdp, RtcDescriptionType::Offer).map_err(|err| format!("{:?}", err))?;
+            let mut peer = peer.lock().unwrap();
 
-            for line in locked_peer.media_lines() {
-                let mut line = RefCell::borrow_mut(line);
-                if line.local_codecs().is_empty() && line.media_type != SdpMediaValue::Application {
-                    let codec = line.remote_codecs().first().unwrap().clone();
-                    line.register_local_codec(codec);
+            let mode = {
+                if mode == "offer" {
+                    RtcDescriptionType::Offer
+                } else {
+                    RtcDescriptionType::Answer
                 }
-            }
+            };
 
-            let mut video_sender = client.data.video_sender.lock().unwrap();
-            if video_sender.is_none() && locked_peer.media_lines().iter().find(|e| RefCell::borrow(e).media_type != SdpMediaValue::Application).is_some() {
-                *video_sender = Some(locked_peer.add_media_sender(SdpMediaValue::Video).unwrap());
-            }
+            peer.set_remote_description(&sdp, &mode).map_err(|err| format!("{:?}", err))?;
 
-            let answer = locked_peer.create_local_description().map_err(|err| format!("{:?}", err))?;
-            println!("Answer: {:?}", answer.to_string());
-            let _ = client.data.command_pipe.0.send(WebCommand::RtcSetRemoteDescription { sdp: answer.to_string(), mode: String::from("answer") });
+            if mode == RtcDescriptionType::Offer {
+                let mut video_sender = client.data.video_sender.lock().unwrap();
+                if video_sender.is_none() && peer.media_lines().iter().find(|e| RefCell::borrow(e).media_type != SdpMediaValue::Application).is_some() {
+                    let mut channel = peer.add_media_sender(SdpMediaValue::Video).unwrap();
+                    channel.register_property(String::from("msid"), Some(String::from(format!("{} -", "VideoReplayChannel"))));
+                    println!("Props: {:?}", channel.properties().deref());
+                    *video_sender = Some(VideoSender{
+                        sender: channel,
+                        request_pli: false
+                    });
+                }
+
+                send_local_description(&mut client.data.command_pipe.0, peer.deref_mut(), String::from("answer"))?;
+            }
         },
         WebCommand::RtcAddIceCandidate { candidate, media_index, .. } => {
             let peer = client.data.peer.as_ref().ok_or(String::from("no peer initialized"))?;
@@ -237,7 +289,9 @@ fn handle_command(client: &mut Client<ClientData>, command: &WebCommand) -> std:
                 .lock().unwrap();
 
             for line in peer.media_lines().iter().map(|e| RefCell::borrow_mut(e).index).collect::<Vec<u32>>() {
-                peer.add_remote_ice_candidate(line, None);
+                if let Err(err) = peer.add_remote_ice_candidate(line, None) {
+                    eprintln!("Failed to signal ICE finished: {:?}", err);
+                }
             }
         }
     }
@@ -272,6 +326,26 @@ fn execute_client(mut client: Client<ClientData>) {
         while let Poll::Ready(message) = client.data.command_pipe.1.poll_next_unpin(cx) {
             let message = message.expect("unexpected channel close");
             client.send_message(&message);
+        }
+
+        let mut sender = client.data.video_sender.lock().unwrap();
+        if let Some(sender) = sender.deref_mut() {
+            while let Poll::Ready(event) = sender.sender.poll_next_unpin(cx) {
+                /* eof can't happen since we've a reference */
+                match event.as_ref().unwrap() {
+                    MediaSenderEvent::PayloadFeedbackReceived(fb) => {
+                        if *fb == RtcpPayloadFeedback::PictureLossIndication {
+                            println!("Video sender channel got pli");
+                            sender.request_pli = true;
+                        } else {
+                            println!("Video sender channel PayloadFeedbackReceived: {:?}", fb);
+                        }
+                    }
+                    _ => {
+                        println!("Video sender channel event: {:?}", event);
+                    }
+                }
+            }
         }
 
         Poll::Pending

@@ -307,7 +307,7 @@ mod test {
             println!("4: {:?}", event);
             instance.advance_clock(500);
             assert_eq!(instance.missing_packets(), vec![224]);
-            let (event, mut instance) = instance.into_future().await;
+            let (event, _instance) = instance.into_future().await;
             println!("5: {:?}", event);
         });
     }

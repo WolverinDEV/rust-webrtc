@@ -1,6 +1,6 @@
 use webrtc_sdp::media_type::{SdpMediaValue, SdpMedia, SdpFormatList, SdpMediaLine, SdpProtocolValue};
-use crate::media::{InternalMediaTrack, Codec, CodecFeedback};
-use webrtc_sdp::attribute_type::{SdpAttributeExtmap, SdpAttribute, SdpAttributeType, SdpAttributeRtcpFb, SdpAttributeRtcpFbType};
+use crate::media::{Codec, NegotiationState};
+use webrtc_sdp::attribute_type::{SdpAttributeExtmap, SdpAttribute, SdpAttributeType};
 use webrtc_sdp::SdpConnection;
 use webrtc_sdp::address::ExplicitlyTypedAddress;
 use std::net::{IpAddr, Ipv4Addr};
@@ -13,7 +13,7 @@ pub struct MediaLine {
 
     /* if zero than currently no transport */
     pub(crate) transport_id: u32,
-    pub(crate) requires_negotiation: bool,
+    pub(crate) negotiation_state: NegotiationState,
 
     pub(crate) remote_streams: Vec<u32>,
     pub(crate) local_streams: Vec<u32>,
@@ -42,7 +42,7 @@ impl MediaLine {
             media_type,
 
             transport_id: 0,
-            requires_negotiation: false,
+            negotiation_state: NegotiationState::None,
 
             remote_streams: Vec::new(),
             local_streams: Vec::new(),
@@ -55,6 +55,10 @@ impl MediaLine {
         }
     }
 
+    pub fn negotiation_state(&self) -> &NegotiationState {
+        &self.negotiation_state
+    }
+
     pub fn remote_codecs(&self) -> &Vec<Codec> {
         &self.remote_codecs
     }
@@ -63,15 +67,23 @@ impl MediaLine {
         &self.local_codecs
     }
 
-    pub fn register_local_codec(&mut self, codec: Codec) {
-        self.unregister_local_codec(codec.payload_type);
+    /// If the negotiation state is Propagated, no changes are allowed.
+    /// Therefore local changes are prohibited.
+    pub fn register_local_codec(&mut self, codec: Codec) -> Result<(), ()> {
+        /* unregister_local_codec implicitly checks if we're able to modify our constraints */
+        self.unregister_local_codec(codec.payload_type)?;
         self.local_codecs.push(codec);
-        self.requires_negotiation = true;
+        Ok(())
     }
 
-    pub fn unregister_local_codec(&mut self, payload_type: u8) {
+    /// If the negotiation state is Propagated, no changes are allowed.
+    /// Therefore local changes are prohibited.
+    pub fn unregister_local_codec(&mut self, payload_type: u8) -> Result<(), ()> {
+        if !self.allow_setting_change() {
+            return Err(())
+        }
         self.local_codecs.retain(|e| e.payload_type != payload_type);
-        self.requires_negotiation = true;
+        Ok(())
     }
 
     pub fn remote_extensions(&self) -> &Vec<SdpAttributeExtmap> {
@@ -82,15 +94,23 @@ impl MediaLine {
         &self.local_extensions
     }
 
-    pub fn register_local_extension(&mut self, extension: SdpAttributeExtmap) {
-        self.unregister_local_extension(extension.id);
+    /// If the negotiation state is Propagated, no changes are allowed.
+    /// Therefore local changes are prohibited.
+    pub fn register_local_extension(&mut self, extension: SdpAttributeExtmap) -> Result<(), ()> {
+        /* register_local_extension implicitly checks if we're able to modify our constraints */
+        self.unregister_local_extension(extension.id)?;
         self.local_extensions.push(extension);
-        self.requires_negotiation = true;
+        Ok(())
     }
 
-    pub fn unregister_local_extension(&mut self, extension_id: u16) {
+    /// If the negotiation state is Propagated, no changes are allowed.
+    /// Therefore local changes are prohibited.
+    pub fn unregister_local_extension(&mut self, extension_id: u16) -> Result<(), ()> {
+        if !self.allow_setting_change() {
+            return Err(())
+        }
         self.local_extensions.retain(|e| e.id == extension_id);
-        self.requires_negotiation = true;
+        Ok(())
     }
 
     pub(crate) fn new_from_sdp(index: u32, media: &SdpMedia) -> Result<Self, MediaLineParseError> {
@@ -153,9 +173,7 @@ impl MediaLine {
 
     /// Attention: Only use this function if the media type is NOT application!
     pub(crate) fn generate_local_description(&self) -> Option<SdpMedia> {
-        if self.media_type == SdpMediaValue::Application {
-            return None;
-        }
+        assert_ne!(self.media_type, SdpMediaValue::Application);
 
         if self.local_codecs.is_empty() {
             return None;
@@ -178,7 +196,7 @@ impl MediaLine {
         media.add_attribute(SdpAttribute::Mid(self.id.clone())).unwrap();
 
         let no_local_streams = self.local_streams.is_empty();
-        let no_remote_streams = self.remote_streams.is_empty() /* TODO: Test if we're doing an offer or answer (If we're doing an offer, set this to false)! */;
+        let no_remote_streams = self.remote_streams.is_empty(); /* TODO: Test if we're doing an offer or answer (If we're doing an offer, set this to false)! */
 
         if no_local_streams && no_remote_streams {
             media.add_attribute(SdpAttribute::Inactive).unwrap();
@@ -200,5 +218,17 @@ impl MediaLine {
         }
 
         Some(media)
+    }
+
+    fn allow_setting_change(&mut self) -> bool {
+        match self.negotiation_state {
+            NegotiationState::None |
+            NegotiationState::Changed => { true },
+            NegotiationState::Propagated => { false },
+            NegotiationState::Negotiated => {
+                self.negotiation_state = NegotiationState::Changed;
+                true
+            }
+        }
     }
 }

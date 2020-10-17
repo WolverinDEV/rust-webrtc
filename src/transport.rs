@@ -57,34 +57,38 @@ pub struct ICECredentials {
     pub password: String
 }
 
-#[derive(Clone, Debug)]
-pub enum PeerICEConnectionFailReason {
+#[derive(Clone, Debug, PartialEq)]
+pub enum RTCTransportFailReason {
+    DtlsInitFailed,
+    DtlsError,
+    DtlsEof,
 
+    IceFinished,
+    IceStreamFinished,
+    IceFailure,
 }
 
-#[derive(Clone, Debug)]
-pub enum PeerICEConnectionState {
+#[derive(Clone, Debug, PartialEq)]
+pub enum RTCTransportState {
     Disconnected,
     Connecting,
     Connected,
-    Failed(PeerICEConnectionFailReason)
+    Failed(RTCTransportFailReason)
 }
 
 #[derive(Clone, Debug)]
 pub enum RTCTransportEvent {
-    StreamStateChanged(ComponentState),
+    TransportStateChanged,
+    IceStateChanged(ComponentState),
+
     LocalIceCandidate(DebugableCandidate),
     LocalIceGatheringFinished(),
-    DtlsInitialized(),
-    DtlsInitializeFailed(String),
 
     MessageReceivedDtls(Vec<u8>),
     MessageReceivedRtp(Vec<u8>),
     MessageReceivedRtcp(Vec<u8>),
     /// We've dropped a message (only when feature `simulated-loss` has been activated)
     MessageDropped(Vec<u8>),
-
-    InternalIoFailed(Vec<u8>, String)
 }
 
 #[derive(Clone, Debug)]
@@ -126,6 +130,9 @@ pub struct RTCTransport {
     /// Containing all media lines which actively listening to the channel events (bundled channels)
     pub media_lines: Vec<u32>,
 
+    state: RTCTransportState,
+    pending_events: VecDeque<RTCTransportEvent>,
+
     pub local_credentials: ICECredentials,
     pub remote_credentials: ICECredentials,
 
@@ -145,7 +152,7 @@ pub struct RTCTransport {
     simulated_loss: u8,
 
     last_ice_state: ComponentState,
-    ice_stream: libnice::ice::Stream,
+    ice_stream: Option<libnice::ice::Stream>,
 
     /// State containing the current dtls state
     dtls: Option<DTLSState>,
@@ -257,6 +264,9 @@ impl RTCTransport {
             owning_media_line: media_line,
             media_lines: Vec::with_capacity(3),
 
+            state: RTCTransportState::Disconnected,
+            pending_events: VecDeque::new(),
+
             remote_credentials,
             local_credentials: ICECredentials{
                 username: String::from(stream.get_local_ufrag()),
@@ -280,7 +290,7 @@ impl RTCTransport {
             #[cfg(feature = "simulated-loss")]
             simulated_loss: 0,
 
-            ice_stream: stream,
+            ice_stream: Some(stream),
             dtls_buffer: Rc::new(RefCell::new(dtls_stream)),
 
             dtls: Some(DTLSState::Uninitialized(ssl)),
@@ -290,7 +300,16 @@ impl RTCTransport {
         Ok(connection)
     }
 
+    pub fn state(&self) -> &RTCTransportState {
+        &self.state
+    }
+
     pub fn add_remote_candidate(&mut self, candidate: Option<&Candidate>) -> Result<(), RTCTransportICECandidateAddError> {
+        if let RTCTransportState::Failed(..) = &self.state {
+            /* TODO: Should we really return okey here? */
+            return Ok(());
+        }
+
         if self.remote_candidates_gathered {
             Err(RTCTransportICECandidateAddError::RemoteCandidatesAlreadyReceived)
         } else if let Some(candidate) = candidate {
@@ -303,10 +322,11 @@ impl RTCTransport {
                 }
                 */
             } else {
-                if candidate.component as usize > self.ice_stream.components().len() {
+                let ice_stream = self.ice_stream.as_mut().expect("missing ice stream");
+                if candidate.component as usize > ice_stream.components().len() {
                     Err(RTCTransportICECandidateAddError::InvalidComponentIndex)
                 } else {
-                    self.ice_stream.add_remote_candidate(candidate);
+                    ice_stream.add_remote_candidate(candidate);
                     Ok(())
                 }
             }
@@ -328,11 +348,14 @@ impl RTCTransport {
                     Ok(srtp) => self.srtp = Some(srtp),
                     Err(err) => {
                         eprintln!("Failed to initialize srtp from openssl init: {:?}", err);
-                        /* TODO: Error handing, close the session here as we require srtp! */
+                        self.failure_tear_down(RTCTransportFailReason::DtlsInitFailed);
+                        return Some(RTCTransportEvent::TransportStateChanged);
                     }
                 }
+
                 self.dtls = Some(DTLSState::Connected(stream));
-                Some(RTCTransportEvent::DtlsInitialized())
+                self.update_state();
+                self.pending_events.pop_front()
             },
             Err(error) => {
                 match error {
@@ -343,12 +366,14 @@ impl RTCTransport {
                     ssl::HandshakeError::Failure(handshake) => {
                         println!("HS failed: {:?}", handshake.error());
                         self.dtls = Some(DTLSState::Failed());
-                        Some(RTCTransportEvent::DtlsInitializeFailed(String::from(format!("{:?}", handshake.error()))))
+                        self.failure_tear_down(RTCTransportFailReason::DtlsInitFailed);
+                        Some(RTCTransportEvent::TransportStateChanged)
                     },
                     ssl::HandshakeError::SetupFailure(error) => {
                         println!("HS setup error: {:?}", error);
                         self.dtls = Some(DTLSState::Failed());
-                        Some(RTCTransportEvent::DtlsInitializeFailed(String::from(format!("{:?}", error))))
+                        self.failure_tear_down(RTCTransportFailReason::DtlsInitFailed);
+                        Some(RTCTransportEvent::TransportStateChanged)
                     }
                 }
             }
@@ -372,7 +397,7 @@ impl RTCTransport {
                     },
                     Err(err) => {
                         if err == Srtp2ErrorCode::ReplayFail {
-                            /* we've probably rerequested the packet twice */
+                            /* we've probably re-requested the packet twice */
                         } else {
                             eprintln!("Failed to unprotect rtp packet: {:?}", err);
                         }
@@ -400,14 +425,66 @@ impl RTCTransport {
         }
         None
     }
+
+    fn failure_tear_down(&mut self, reason: RTCTransportFailReason) {
+        self.state = RTCTransportState::Failed(reason);
+
+        /* cleanup the resources */
+        self.dtls = None;
+        self.ice_stream = None;
+        RefCell::borrow_mut(&self.dtls_buffer).flush();
+    }
+
+    fn update_state(&mut self) {
+        if let RTCTransportState::Failed(..) = self.state {
+            return;
+        }
+
+        let state = {
+            match self.last_ice_state {
+                ComponentState::Ready |
+                ComponentState::Connected => {
+                    if let Some(DTLSState::Connected(..)) = &self.dtls {
+                        RTCTransportState::Connected
+                    } else {
+                        RTCTransportState::Connecting
+                    }
+                },
+                ComponentState::Gathering |
+                ComponentState::Connecting => {
+                    RTCTransportState::Connecting
+                },
+                ComponentState::Disconnected => {
+                    RTCTransportState::Disconnected
+                },
+                ComponentState::Failed => {
+                    panic!("this should never happen");
+                }
+            }
+        };
+
+        if state != self.state {
+            self.state = state;
+            self.pending_events.push_back(RTCTransportEvent::TransportStateChanged);
+        }
+    }
 }
 
 impl Stream for RTCTransport {
     type Item = RTCTransportEvent;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if !self.pending_events.is_empty() {
+            return Poll::Ready(Some(self.pending_events.pop_front().unwrap()));
+        }
+
+        if let RTCTransportState::Failed(..) = self.state {
+            /* we can't do anything... */
+            return Poll::Pending;
+        }
+
         if !self.local_candidates_gathered {
-            if let Poll::Ready(candidate) = self.ice_stream.poll_next_unpin(cx) {
+            if let Poll::Ready(candidate) = self.ice_stream.as_mut().expect("missing ice stream").poll_next_unpin(cx) {
                 return if let Some(ice_candidate) = candidate {
                     Poll::Ready(Some(RTCTransportEvent::LocalIceCandidate(DebugableCandidate{ inner: ice_candidate })))
                 } else {
@@ -419,29 +496,34 @@ impl Stream for RTCTransport {
 
         let ice_state: ComponentState;
         {
-            let component = &mut self.ice_stream.mut_components()[0];
+            let component = &mut self.ice_stream.as_mut().expect("missing ice stream").mut_components()[0];
             while let Poll::Ready(_) = component.poll_state(cx) {
-                /* TODO: Better error handing then just sending None? */
-                println!("Ice component finished");
-                return Poll::Ready(None);
+                self.failure_tear_down(RTCTransportFailReason::IceFinished);
+                return Poll::Ready(Some(RTCTransportEvent::TransportStateChanged));
             }
 
             ice_state = component.get_state();
             if ice_state != self.last_ice_state {
                 println!("ICE state change from {:?} to {:?}", self.last_ice_state, ice_state);
                 self.last_ice_state = ice_state;
-                return Poll::Ready(Some(RTCTransportEvent::StreamStateChanged(ice_state)));
+                if ice_state == ComponentState::Failed {
+                    self.failure_tear_down(RTCTransportFailReason::IceFailure);
+                    return Poll::Ready(Some(RTCTransportEvent::TransportStateChanged));
+                } else {
+                    self.update_state();
+                    return Poll::Ready(Some(RTCTransportEvent::IceStateChanged(ice_state)));
+                }
             }
         }
 
-        while let Poll::Ready(data) = { self.ice_stream.mut_components()[0].poll_next_unpin(cx) } {
+        while let Poll::Ready(data) = { self.ice_stream.as_mut().expect("missing ice stream").mut_components()[0].poll_next_unpin(cx) } {
             if let Some(data) = data {
                 if let Some(event) = self.process_incoming_data(data) {
                     return Poll::Ready(Some(event));
                 }
             } else {
-                /* TODO: Some kind of handling and not panicking */
-                panic!("A ice component stream close should be polled earlier");
+                self.failure_tear_down(RTCTransportFailReason::IceStreamFinished);
+                return Poll::Ready(Some(RTCTransportEvent::TransportStateChanged));
             }
         }
 
@@ -492,20 +574,20 @@ impl Stream for RTCTransport {
                 let mut buffer = [0u8; 2048];
                 match stream.read(&mut buffer) {
                     Ok(read) => {
-                        if read == 0 {
-                            /* TODO: Shutdown handling */
-                            let _ = std::mem::replace(&mut self.dtls, Some(DTLSState::Failed()));
-                            println!("DTLS read returned EOF");
+                        return if read == 0 {
+                            self.failure_tear_down(RTCTransportFailReason::DtlsEof);
+                            Poll::Ready(Some(RTCTransportEvent::TransportStateChanged))
                         } else {
-                            return Poll::Ready(Some(RTCTransportEvent::MessageReceivedDtls(buffer[..read].to_vec())));
+                            Poll::Ready(Some(RTCTransportEvent::MessageReceivedDtls(buffer[..read].to_vec())))
                         }
                     },
                     Err(error) => {
                         match &error.kind() {
                             &ErrorKind::WouldBlock => { /* nothing to do */ },
                             _ => {
-                                /* TODO: Appropriate error handling, may even terminate this stream? */
-                                println!("SSL Read error: {}", &error);
+                                eprintln!("Received DTLS read error: {}", &error);
+                                self.failure_tear_down(RTCTransportFailReason::DtlsError);
+                                return Poll::Ready(Some(RTCTransportEvent::TransportStateChanged));
                             }
                         }
                     }
@@ -523,7 +605,7 @@ impl Stream for RTCTransport {
                         stream.write(&buffer)
                             .expect("failed to send message via dtls");
                     } else {
-                        println!("Tried to send a dtls message without an active session");
+                        eprintln!("Tried to send a dtls message without an active session");
                     }
                 },
                 RTCTransportControl::SendRtpMessage(mut buffer) => {
@@ -533,7 +615,8 @@ impl Stream for RTCTransport {
                         match srtp.protect(buffer.as_mut_slice(), length) {
                             Ok(length) => {
                                 buffer.truncate(length);
-                                let _ = self.ice_stream.mut_components()[0].send(buffer)
+                                let _ = self.ice_stream.as_mut().expect("missing ice stream")
+                                    .mut_components()[0].send(buffer)
                                     .now_or_never().expect("unbound message sending should not error");
                             },
                             Err(error) => {
@@ -551,7 +634,8 @@ impl Stream for RTCTransport {
                         match srtp.protect_rtcp(buffer.as_mut_slice(), length) {
                             Ok(length) => {
                                 buffer.truncate(length);
-                                let _ = self.ice_stream.mut_components()[0].send(buffer)
+                                let _ = self.ice_stream.as_mut().expect("missing ice stream")
+                                    .mut_components()[0].send(buffer)
                                     .now_or_never().expect("unbound message sending should not error");
                             },
                             Err(error) => {
@@ -565,6 +649,11 @@ impl Stream for RTCTransport {
             }
         }
 
+        /* maybe some of the above polled methods triggered some internal events which needs to be processed */
+        if !self.pending_events.is_empty() {
+            cx.waker().wake_by_ref();
+        }
+
         Poll::Pending
     }
 }
@@ -576,6 +665,13 @@ struct DtlsStreamSource {
     read_buffer_offset: usize,
 
     writer: ComponentWriter
+}
+
+impl DtlsStreamSource {
+    pub fn flush(&mut self) {
+        self.read_buffer.clear();
+        self.read_buffer_offset = 0;
+    }
 }
 
 struct DtlsStream {

@@ -419,11 +419,11 @@ impl ChannelApplication {
         println!("Configuring application channel");
 
         let dtls_role_client = match media.get_attribute(SdpAttributeType::Setup) {
-            Some(SdpAttribute::Setup(SdpAttributeSetup::Active)) => Ok(true),
-            Some(SdpAttribute::Setup(SdpAttributeSetup::Passive)) => Ok(false),
+            Some(SdpAttribute::Setup(SdpAttributeSetup::Active)) => Ok(false),
+            Some(SdpAttribute::Setup(SdpAttributeSetup::Passive)) => Ok(true),
             Some(SdpAttribute::Setup(SdpAttributeSetup::Actpass)) => {
                 match ACT_PASS_DEFAULT_SETUP_TYPE {
-                    SdpAttributeSetup::Actpass => Ok(true),
+                    SdpAttributeSetup::Active => Ok(true),
                     SdpAttributeSetup::Passive => Ok(false),
                     _ => panic!("this branch should never be reached")
                 }
@@ -479,11 +479,16 @@ impl ChannelApplication {
         Ok(media)
     }
 
-    pub fn handle_transport_initialized(&mut self) {
+    pub fn handle_transport_connected(&mut self) {
         if self.transport.is_none() {
             return;
         }
 
+        if self.state != ApplicationChannelState::Disconnected {
+            return;
+        }
+
+        self.state = ApplicationChannelState::Connecting;
         self.sctp_session.connect(self.remote_config.as_ref().expect("missing remote config").port);
 
         let _result = self.sctp_session.change_peer_addr_params(|params| {
