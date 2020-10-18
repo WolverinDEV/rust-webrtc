@@ -12,8 +12,6 @@ pub use receiver::*;
 
 mod sender;
 pub use sender::*;
-use tokio::sync::mpsc;
-use crate::transport::RTCTransportControl;
 use std::io::Error;
 
 #[derive(Debug, PartialEq, Copy, Clone)]
@@ -35,8 +33,7 @@ pub(crate) struct InternalMediaTrack {
     pub id: u32,
     pub media_line: u32,
 
-    pub transport_id: u32,
-    pub transport: mpsc::UnboundedSender<RTCTransportControl>,
+    pub transport_id: u32
 }
 
 impl InternalMediaTrack {

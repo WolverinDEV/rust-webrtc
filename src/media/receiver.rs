@@ -2,7 +2,7 @@ use futures::{Stream, StreamExt};
 use tokio::sync::mpsc;
 use crate::utils::rtp::ParsedRtpPacket;
 use crate::utils::rtcp::RtcpPacket;
-use crate::transport::RTCTransportControl;
+use crate::transport::{RtcpSender};
 use futures::task::{Context, Poll};
 use tokio::macros::support::Pin;
 use crate::utils::{RtpPacketResendRequester, RtpPacketResendRequesterEvent};
@@ -93,6 +93,7 @@ pub(crate) struct InternalMediaReceiver {
     pub control_receiver: mpsc::UnboundedReceiver<InternalReceiverControl>,
 
     pub resend_requester: RtpPacketResendRequester,
+    pub rtcp_sender: RtcpSender,
 }
 
 impl InternalMediaReceiver {
@@ -126,9 +127,7 @@ impl InternalMediaReceiver {
                     };
 
                     println!("Resending packets on {} {:?} -> {:?}", self.track.id, packets, &feedback);
-                    let _ = self.track.transport.send(RTCTransportControl::SendRtcpMessage(
-                        RtcpPacket::TransportFeedback(feedback).to_vec().expect("failed to create transport feedback packet")
-                    ));
+                    self.rtcp_sender.send(&RtcpPacket::TransportFeedback(feedback));
                 },
                 _ => {
                     println!("InternalMediaReceiver::RtpPacketResendRequesterEvent {:?}", event);
@@ -150,7 +149,7 @@ impl InternalMediaReceiver {
     fn handle_control_message(&mut self, message: InternalReceiverControl) {
         match message {
             InternalReceiverControl::SendRtcpPacket(packet) => {
-                let _ = self.track.transport.send(RTCTransportControl::SendRtcpMessage(packet));
+                self.rtcp_sender.send_rtcp(packet.as_slice());
             },
             InternalReceiverControl::ResetPendingResends => {
                 self.resend_requester.reset_resends();

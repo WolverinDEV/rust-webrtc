@@ -237,12 +237,12 @@ async function initializePeer() {
             return;
         }
         console.log("[AUD] Received remote %s track %s (%s) %s", event.track.kind, event.track.id, event.track.label, event.streams[0]?.id);
+        event.track.onmute = () => console.log("[AUD] Muted %s", event.track.id);
+        event.track.onunmute = () => console.log("[AUD] Unmute %s", event.track.id);
+        event.track.onended = () => console.log("[AUD] Ended %s", event.track.id);
+        event.track.onisolationchange = () => console.log("[AUD] Isolationchange %s", event.track.id);
         if(event.track.kind === "audio") {
             console.error("Streams: %o", event.streams);
-            event.track.onmute = () => console.log("[AUD] Muted %s", event.track.id);
-            event.track.onunmute = () => console.log("[AUD] Unmute %s", event.track.id);
-            event.track.onended = () => console.log("[AUD] Ended %s", event.track.id);
-            event.track.onisolationchange = () => console.log("[AUD] Isolationchange %s", event.track.id);
 
             const mstream = new MediaStream();
             (window as any).track = event.track;

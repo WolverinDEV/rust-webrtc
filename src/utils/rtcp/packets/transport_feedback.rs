@@ -10,6 +10,33 @@ pub struct RtcpFeedbackGenericNACK {
     pub bitmask_lost_packets: u16
 }
 
+pub struct NackPacketIterator {
+    packet_id: u16,
+    bitmask: u16,
+    index: u8
+}
+
+impl Iterator for NackPacketIterator {
+    type Item = u16;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.index < 17 {
+            if self.index == 0 {
+                self.index = 1;
+                return Some(self.packet_id);
+            } else {
+                let set = (self.bitmask & (1 << (self.index - 1))) > 0;
+                self.index += 1;
+                if set {
+                    return Some(self.packet_id.wrapping_add(self.index as u16));
+                }
+            }
+        }
+
+        None
+    }
+}
+
 impl RtcpFeedbackGenericNACK {
     pub fn parse(reader: &mut Cursor<&[u8]>) -> Result<RtcpFeedbackGenericNACK> {
         let pid = reader.read_u16::<BigEndian>()?;
@@ -30,22 +57,17 @@ impl RtcpFeedbackGenericNACK {
         writer.write_u16::<BigEndian>(self.bitmask_lost_packets)?;
         Ok(())
     }
+
+    pub fn lost_packets(&self) -> NackPacketIterator {
+        NackPacketIterator{ index: 0, packet_id: self.packet_id, bitmask: self.bitmask_lost_packets }
+    }
 }
 
 impl Debug for RtcpFeedbackGenericNACK {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let mut packets = Vec::<u16>::new();
         packets.reserve(17);
-        packets.push(self.packet_id);
-        for index in 0..16 {
-            let value = self.bitmask_lost_packets & (1 << index);
-            if value == 0 {
-                continue;
-            }
-
-            packets.push(self.packet_id.wrapping_add(index + 1));
-        }
-
+        self.lost_packets().for_each(|pkt| packets.push(pkt));
         f.debug_struct("RtcpFeedbackGenericNACK")
             .field("lost_packets", &packets)
             .finish()

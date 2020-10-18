@@ -46,6 +46,8 @@ pub struct RtpPacketResendRequester {
     /* must be at least the receive_timestamps length, else black magic happens */
     clipping_window: u16,
 
+    nack_delay: u32,
+
     events: (mpsc::UnboundedSender<RtpPacketResendRequesterEvent>, mpsc::UnboundedReceiver<RtpPacketResendRequesterEvent>),
     resend_delay: Option<tokio::time::Delay>
 }
@@ -66,6 +68,8 @@ impl RtpPacketResendRequester {
             pending_timestamps: [0xFFFFFFFF; RECEIVE_WINDOW_SIZE],
 
             clipping_window: 1024,
+
+            nack_delay: 5,
 
             events: mpsc::unbounded_channel(),
             resend_delay: None
@@ -121,7 +125,7 @@ impl RtpPacketResendRequester {
             let mut lost_packets_count = 0;
 
             /* TODO: Add RTT here, else out of order packets are directly counted as loss */
-            let expected_arrival_timestamp = self.current_timestamp() + 100;
+            let expected_arrival_timestamp = self.current_timestamp() + self.nack_delay;
 
             for index in 0..new_packets {
                 let timestamp_index = (self.pending_timestamp_index + index) % self.pending_timestamps.len();

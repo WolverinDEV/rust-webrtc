@@ -301,6 +301,10 @@ impl PeerConnection {
                         line.negotiation_state = NegotiationState::Negotiated;
                     }
                 }
+                for sender in self.stream_sender.values() {
+                    let mut sender = RefCell::borrow_mut(sender);
+                    sender.promote_negotiation(|s| matches!(s, NegotiationState::Propagated), NegotiationState::Negotiated);
+                }
 
                 self.signalling_state = SignallingState::Negotiated;
             },
@@ -342,8 +346,7 @@ impl PeerConnection {
                     id: *receiver_id,
                     media_line: media_line.index,
 
-                    transport_id: media_line.transport_id,
-                    transport: transport.control_sender.clone(),
+                    transport_id: media_line.transport_id
                 },
 
                 event_sender: tx,
@@ -352,6 +355,7 @@ impl PeerConnection {
                 properties: HashMap::new(),
 
                 resend_requester: RtpPacketResendRequester::new(),
+                rtcp_sender: transport.create_rtcp_sender()
             };
             internal_receiver.parse_properties_from_sdp(media);
 
@@ -438,12 +442,20 @@ impl PeerConnection {
                         line.negotiation_state = NegotiationState::Propagated;
                     }
                 }
+                for sender in self.stream_sender.values() {
+                    let mut sender = RefCell::borrow_mut(sender);
+                    sender.promote_negotiation(|s| matches!(s, NegotiationState::Changed | NegotiationState::None), NegotiationState::Propagated);
+                }
                 self.signalling_state = SignallingState::HaveLocalOffer;
             },
             &SignallingState::HaveRemoteOffer => {
                 for line in self.media_lines.iter() {
                     let mut line = RefCell::borrow_mut(line);
                     line.negotiation_state = NegotiationState::Negotiated;
+                }
+                for sender in self.stream_sender.values() {
+                    let mut sender = RefCell::borrow_mut(sender);
+                    sender.promote_negotiation(|_| true, NegotiationState::Negotiated);
                 }
                 self.signalling_state = SignallingState::Negotiated;
             }
@@ -477,15 +489,16 @@ impl PeerConnection {
         let media_line = self.allocate_sender_media_line(media_type);
         let mut media_line = RefCell::borrow_mut(&media_line);
 
+        let mut transport = RefCell::borrow_mut(self.transport.get(&media_line.transport_id).expect("missing transport"));
         let (internal_sender, sender) = InternalMediaSender::new(
             InternalMediaTrack {
                 /* TODO: Ensure this hasn't been used already */
                 id: rand::random::<u32>(),
                 media_line: media_line.index,
 
-                transport_id: media_line.transport_id,
-                transport: RefCell::borrow(self.transport.get(&media_line.transport_id).expect("missing transport")).control_sender.clone(),
-            }
+                transport_id: media_line.transport_id
+            },
+            (transport.create_rtp_sender(), transport.create_rtcp_sender())
         );
 
         /* TODO: Trigger renegotiation */
@@ -539,7 +552,7 @@ impl PeerConnection {
             /* FIXME! */
             #[cfg(feature = "simulated-loss")]
             {
-                //connection.set_simulated_loss(20);
+                //connection.set_simulated_loss(10);
             }
 
             let id = connection.transport_id;
@@ -764,10 +777,17 @@ impl futures::stream::Stream for PeerConnection {
         let _ = self.ice_agent.poll_unpin(cx);
 
         if self.signalling_state == SignallingState::Negotiated {
+            let mut negotiation_required = false;
             if self.media_lines.iter()
                 .find(|e| matches!(RefCell::borrow(e).negotiation_state(), NegotiationState::None | NegotiationState::Changed))
                 .is_some() {
-
+                negotiation_required = true;
+            }
+            if !negotiation_required && self.stream_sender.values()
+                .find(|e| RefCell::borrow(e).negotiation_needed()).is_some() {
+                negotiation_required = true;
+            }
+            if negotiation_required {
                 self.signalling_state = SignallingState::NegotiationRequired;
                 return Poll::Ready(Some(PeerConnectionEvent::NegotiationNeeded));
             }

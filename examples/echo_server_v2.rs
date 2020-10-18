@@ -7,7 +7,7 @@ use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 
 use webrtc_sdp::parse_sdp;
-use webrtc_sdp::attribute_type::{SdpAttribute};
+use webrtc_sdp::attribute_type::{SdpAttribute, SdpAttributeRtcpFbType};
 use std::sync::{Arc, Mutex};
 use std::ops::{DerefMut, Deref};
 use std::str::FromStr;
@@ -15,7 +15,7 @@ use futures::task::{Poll};
 use tokio::sync::mpsc;
 use web_test::{rtc, initialize_webrtc};
 use web_test::rtc::{PeerConnection, PeerConnectionEvent, RtcDescriptionType};
-use web_test::media::{MediaSender, MediaReceiverEvent, Codec, MediaSenderEvent};
+use web_test::media::{MediaSender, MediaReceiverEvent, Codec, MediaSenderEvent, CodecFeedback};
 use crate::shared::gio::MAIN_GIO_EVENT_LOOP;
 use crate::shared::ws::{WebCommand, Client, ClientEvents};
 use rtp_rs::Seq;
@@ -79,7 +79,6 @@ fn main() {
     });
 }
 
-static mut PACKET_ID: u16 = 1000;
 fn spawn_client_peer(client: &mut Client<ClientData>) {
     assert!(client.data.peer.is_none());
 
@@ -138,11 +137,9 @@ fn spawn_client_peer(client: &mut Client<ClientData>) {
                                 MediaReceiverEvent::DataReceived(packet) => {
                                     //println!("Remote stream {} received RTP data {}", receiver.id, packet.payload().len());
                                     if let Some(stream) = video_stream.lock().unwrap().deref_mut() {
-                                        let builder = packet.create_builder()
-                                            .ssrc(stream.sender.id)
-                                            .sequence(Seq::from(unsafe { PACKET_ID = PACKET_ID.wrapping_add(1); PACKET_ID }));
-
-                                        stream.sender.send_data(builder.build().unwrap());
+                                        *stream.sender.payload_type_mut() = packet.payload_type();
+                                        //*stream.sender.contributing_sources_mut() = vec![packet.ssrc()];
+                                        stream.sender.send(packet.payload(), packet.mark(), packet.timestamp(), None);
                                         if stream.request_pli {
                                             stream.request_pli = false;
                                             receiver.reset_pending_resends();
@@ -167,6 +164,7 @@ fn spawn_client_peer(client: &mut Client<ClientData>) {
                     //let channel = peer.lock().unwrap().create_data_channel(DataChannelType::Reliable, String::from(format!("reply - {}", channel.label())), None, 0).unwrap();
 
                     let peer = peer.clone();
+                    let video_stream = video_stream.clone();
                     tokio::spawn(async move {
                         let mut channel = channel;
                         loop {
@@ -184,6 +182,10 @@ fn spawn_client_peer(client: &mut Client<ClientData>) {
                                     if let DataChannelMessage::String(Some(text)) = message {
                                         if text == "create" {
                                             peer.lock().unwrap().add_media_sender(SdpMediaValue::Video);
+                                        } else if text == "rename" {
+                                            if let Some(stream) = video_stream.lock().unwrap().as_mut() {
+                                                stream.sender.register_property(String::from("msid"), Some(String::from("NewChannel? -")));
+                                            }
                                         }
                                         channel.send_text_message(Some(text));
                                     }
@@ -220,7 +222,7 @@ fn send_local_description(command_pipe: &mut mpsc::UnboundedSender<WebCommand>, 
                 payload_type: 96,
                 frequency: 90_000,
                 codec_name: String::from("VP8"),
-                feedback: vec![],
+                feedback: vec![ ],
                 channels: None,
                 parameters: None
             }).expect("failed to register local codec");

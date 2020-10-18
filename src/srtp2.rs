@@ -112,8 +112,7 @@ pub enum OpenSSLImportError {
 
 /// A wrapper around two srtp instances, used for en/decoding rt(c)p packets.
 pub struct Srtp2 {
-    state_in: ffi::srtp_t,
-    state_out: ffi::srtp_t,
+    state: ffi::srtp_t
 }
 
 /// Globally initialize Srtp.
@@ -126,15 +125,12 @@ pub fn srtp2_global_init() -> Result<(), Srtp2ErrorCode> {
 
 impl Srtp2 {
     /// Create a new Srtp2 wrapper using the incoming and outgoing srtp policies.
-    pub fn new(incoming_policy: &ffi::srtp_policy_t, outgoing_policy: &ffi::srtp_policy_t) -> Result<Self, Srtp2ErrorCode> {
-        let mut state_in = unsafe { mem::zeroed::<ffi::srtp_t>() };
-        let mut state_out = unsafe { mem::zeroed::<ffi::srtp_t>() };
-        Srtp2ErrorCode::from(unsafe { ffi::srtp_create(&mut state_in, incoming_policy) }).success()?;
-        Srtp2ErrorCode::from(unsafe { ffi::srtp_create(&mut state_out, outgoing_policy) }).success()?;
+    pub fn new(policy: &ffi::srtp_policy_t) -> Result<Self, Srtp2ErrorCode> {
+        let mut state = unsafe { mem::zeroed::<ffi::srtp_t>() };
+        Srtp2ErrorCode::from(unsafe { ffi::srtp_create(&mut state, policy) }).success()?;
 
         Ok(Srtp2 {
-            state_in,
-            state_out
+            state
         })
     }
 
@@ -144,7 +140,7 @@ impl Srtp2 {
     pub fn unprotect(&self, buffer: &mut [u8]) -> Result<usize, Srtp2ErrorCode> {
         let mut length = buffer.len() as c_int;
         Srtp2ErrorCode::from(unsafe {
-            ffi::srtp_unprotect(self.state_in, buffer.as_mut_ptr() as *mut c_void, &mut length)
+            ffi::srtp_unprotect(self.state, buffer.as_mut_ptr() as *mut c_void, &mut length)
         }).success()?;
 
         assert!(length >= 0);
@@ -158,7 +154,7 @@ impl Srtp2 {
     pub fn unprotect_rtcp(&self, buffer: &mut [u8]) -> Result<usize, Srtp2ErrorCode> {
         let mut length = buffer.len() as c_int;
         Srtp2ErrorCode::from(unsafe {
-            ffi::srtp_unprotect_rtcp(self.state_in, buffer.as_mut_ptr() as *mut c_void, &mut length)
+            ffi::srtp_unprotect_rtcp(self.state, buffer.as_mut_ptr() as *mut c_void, &mut length)
         }).success()?;
 
         //length *= 4;
@@ -173,7 +169,7 @@ impl Srtp2 {
     pub fn protect(&self, buffer: &mut [u8], payload_length: usize) -> Result<usize, Srtp2ErrorCode> {
         let mut length = payload_length as i32;
         Srtp2ErrorCode::from(unsafe {
-            ffi::srtp_protect(self.state_out, buffer.as_mut_ptr() as *mut c_void, &mut length)
+            ffi::srtp_protect(self.state, buffer.as_mut_ptr() as *mut c_void, &mut length)
         }).success()?;
 
         assert!(length >= 0 && (length as usize) < buffer.len());
@@ -187,7 +183,7 @@ impl Srtp2 {
     pub fn protect_rtcp(&self, buffer: &mut [u8], payload_length: usize) -> Result<usize, Srtp2ErrorCode> {
         let mut length = payload_length as i32;
         Srtp2ErrorCode::from(unsafe {
-            ffi::srtp_protect_rtcp(self.state_out, buffer.as_mut_ptr() as *mut c_void, &mut length)
+            ffi::srtp_protect_rtcp(self.state, buffer.as_mut_ptr() as *mut c_void, &mut length)
         }).success()?;
 
         assert!(length >= 0 && (length as usize) < buffer.len());
@@ -202,7 +198,10 @@ impl Srtp2 {
     /// - SRTP_AES128_CM_SHA1_32
     /// Any other modes are not supported and will result in an
     /// `OpenSSLImportError::SrtpProfileNotSupported` error.
-    pub fn from_openssl(context: &openssl::ssl::SslRef) -> Result<Self, OpenSSLImportError> {
+    ///
+    /// It returns a tuple containing Srtp2 instances.
+    /// The first one is the remote (use for receiving packets) and the second one the local instance (use for sending packets)
+    pub fn from_openssl(context: &openssl::ssl::SslRef) -> Result<(Self, Self), OpenSSLImportError> {
         let profile = context.selected_srtp_profile();
         if profile.is_none() {
             return Err(OpenSSLImportError::MissingSrtpProfile);
@@ -301,19 +300,19 @@ impl Srtp2 {
             remote_policy.key = key_salt_b.as_mut_ptr();
         }
 
-        let result = Srtp2::new(&remote_policy, &local_policy)
+        let remote_result = Srtp2::new(&remote_policy)
             .map_err(|err| OpenSSLImportError::SrtpError(err))?;
 
-        Ok(result)
+        let local_result = Srtp2::new(&local_policy)
+            .map_err(|err| OpenSSLImportError::SrtpError(err))?;
+
+        Ok((remote_result, local_result))
     }
 }
 
 impl Drop for Srtp2 {
     fn drop(&mut self) {
-        let _ = Srtp2ErrorCode::from(unsafe { ffi::srtp_dealloc(self.state_in) }).success()
+        let _ = Srtp2ErrorCode::from(unsafe { ffi::srtp_dealloc(self.state) }).success()
             .map_err(|error| eprintln!("failed to deallocate srtp in state: {:?}", error));
-
-        let _ = Srtp2ErrorCode::from(unsafe { ffi::srtp_dealloc(self.state_out) }).success()
-            .map_err(|error| eprintln!("failed to deallocate srtp out state: {:?}", error));
     }
 }

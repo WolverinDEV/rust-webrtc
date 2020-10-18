@@ -7,7 +7,7 @@ use futures::prelude::*;
 use futures::task::{Poll};
 use std::task::Context;
 use std::collections::{VecDeque};
-use futures::{StreamExt, SinkExt, FutureExt};
+use futures::{StreamExt};
 use openssl::{ x509, pkey, rsa, ssl };
 use openssl::bn::BigNum;
 use openssl::error::ErrorStack;
@@ -27,6 +27,11 @@ use crate::srtp2::{Srtp2, Srtp2ErrorCode};
 use crate::utils::rtp::is_rtp_header;
 use crate::utils::rtcp::is_rtcp_header;
 use std::sync::atomic::{AtomicU32, Ordering};
+
+pub mod packet_history;
+mod sender;
+pub use sender::*;
+use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
 pub struct DebugableCandidate {
@@ -93,9 +98,7 @@ pub enum RTCTransportEvent {
 
 #[derive(Clone, Debug)]
 pub enum RTCTransportControl {
-    SendMessage(Vec<u8>),
-    SendRtpMessage(Vec<u8>),
-    SendRtcpMessage(Vec<u8>)
+    SendMessage(Vec<u8>)
 }
 
 #[derive(Debug)]
@@ -159,7 +162,8 @@ pub struct RTCTransport {
     /// Internal buffer for the dtls stream
     dtls_buffer: Rc<RefCell<DtlsStreamSource>>,
 
-    srtp: Option<Srtp2>,
+    srtp_in: Option<Srtp2>,
+    sender_backend: Arc<Mutex<Option<SenderBackend>>>,
 }
 
 static TRANSPORT_ID_INDEX: AtomicU32 = AtomicU32::new(1);
@@ -294,7 +298,9 @@ impl RTCTransport {
             dtls_buffer: Rc::new(RefCell::new(dtls_stream)),
 
             dtls: Some(DTLSState::Uninitialized(ssl)),
-            srtp: None
+            srtp_in: None,
+
+            sender_backend: Arc::new(Mutex::new(None))
         };
 
         Ok(connection)
@@ -336,6 +342,14 @@ impl RTCTransport {
         }
     }
 
+    pub fn create_rtp_sender(&mut self) -> RtpSender {
+        RtpSender::new(self.sender_backend.clone())
+    }
+
+    pub fn create_rtcp_sender(&mut self) -> RtcpSender {
+        RtcpSender::new(self.sender_backend.clone())
+    }
+
     #[cfg(feature = "simulated-loss")]
     pub fn set_simulated_loss(&mut self, loss: u8) {
         self.simulated_loss = loss;
@@ -345,7 +359,15 @@ impl RTCTransport {
         match result {
             Ok(stream) => {
                 match Srtp2::from_openssl(stream.ssl()) {
-                    Ok(srtp) => self.srtp = Some(srtp),
+                    Ok(srtp) => {
+                        self.srtp_in = Some(srtp.0);
+
+                        let mut backend = self.sender_backend.lock().unwrap();
+                        *backend = Some(SenderBackend{
+                            srtp: srtp.1,
+                            transport: self.ice_stream.as_mut().unwrap().mut_components()[0].writer()
+                        });
+                    },
                     Err(err) => {
                         eprintln!("Failed to initialize srtp from openssl init: {:?}", err);
                         self.failure_tear_down(RTCTransportFailReason::DtlsInitFailed);
@@ -389,7 +411,7 @@ impl RTCTransport {
         if DtlsStream::is_ssl_packet(&data) {
             self.dtls_buffer.borrow_mut().read_buffer.push_back(data);
         } else if is_rtp_header(data.as_slice()) {
-            if let Some(srtp) = &self.srtp {
+            if let Some(srtp) = &self.srtp_in {
                 match srtp.unprotect(data.as_mut_slice()) {
                     Ok(len) => {
                         data.truncate(len);
@@ -407,7 +429,7 @@ impl RTCTransport {
                 eprintln!("Received SRTCP data, but we've not initialized srtp yet.");
             }
         } else if is_rtcp_header(data.as_slice()) {
-            if let Some(srtp) = &self.srtp {
+            if let Some(srtp) = &self.srtp_in {
                 match srtp.unprotect_rtcp(data.as_mut_slice()) {
                     Ok(len) => {
                         data.truncate(len);
@@ -432,6 +454,7 @@ impl RTCTransport {
         /* cleanup the resources */
         self.dtls = None;
         self.ice_stream = None;
+        *self.sender_backend.lock().unwrap() = None;
         RefCell::borrow_mut(&self.dtls_buffer).flush();
     }
 
@@ -606,44 +629,6 @@ impl Stream for RTCTransport {
                             .expect("failed to send message via dtls");
                     } else {
                         eprintln!("Tried to send a dtls message without an active session");
-                    }
-                },
-                RTCTransportControl::SendRtpMessage(mut buffer) => {
-                    if let Some(srtp) = &mut self.srtp {
-                        let length = buffer.len();
-                        buffer.resize(length + 148, 0xFE);
-                        match srtp.protect(buffer.as_mut_slice(), length) {
-                            Ok(length) => {
-                                buffer.truncate(length);
-                                let _ = self.ice_stream.as_mut().expect("missing ice stream")
-                                    .mut_components()[0].send(buffer)
-                                    .now_or_never().expect("unbound message sending should not error");
-                            },
-                            Err(error) => {
-                                eprintln!("failed to protect rtp packet: {:?}", error);
-                            }
-                        }
-                    } else {
-                        eprintln!("tried to send rtp data, but srtp hasn't been initialized yet");
-                    }
-                },
-                RTCTransportControl::SendRtcpMessage(mut buffer) => {
-                    if let Some(srtp) = &mut self.srtp {
-                        let length = buffer.len();
-                        buffer.resize(length + 148, 0);
-                        match srtp.protect_rtcp(buffer.as_mut_slice(), length) {
-                            Ok(length) => {
-                                buffer.truncate(length);
-                                let _ = self.ice_stream.as_mut().expect("missing ice stream")
-                                    .mut_components()[0].send(buffer)
-                                    .now_or_never().expect("unbound message sending should not error");
-                            },
-                            Err(error) => {
-                                eprintln!("failed to protect rtcp packet: {:?}", error);
-                            }
-                        }
-                    } else {
-                        eprintln!("tried to send rtcp data, but srtp hasn't been initialized yet");
                     }
                 }
             }
