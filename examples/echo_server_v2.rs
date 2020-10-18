@@ -24,6 +24,7 @@ use std::cell::RefCell;
 use web_test::application::{DataChannelEvent, DataChannelMessage};
 use web_test::utils::rtcp::RtcpPacket;
 use web_test::utils::rtcp::packets::{RtcpPacketPayloadFeedback, RtcpPayloadFeedback};
+use futures::future::{Abortable, AbortHandle};
 
 mod shared;
 mod video;
@@ -35,7 +36,9 @@ struct VideoSender {
 
 struct ClientData {
     event_loop: Option<glib::MainLoop>,
+
     peer: Option<Arc<Mutex<rtc::PeerConnection>>>,
+    peer_abort: Option<futures::future::AbortHandle>,
     command_pipe: (mpsc::UnboundedSender<WebCommand>, mpsc::UnboundedReceiver<WebCommand>),
 
     video_sender: Arc<Mutex<Option<VideoSender>>>
@@ -46,8 +49,17 @@ impl Default for ClientData {
         ClientData {
             event_loop: Some(MAIN_GIO_EVENT_LOOP.lock().unwrap().event_loop()),
             peer: None,
+            peer_abort: None,
             command_pipe: mpsc::unbounded_channel(),
             video_sender: Arc::new(Mutex::new(None))
+        }
+    }
+}
+
+impl Drop for ClientData {
+    fn drop(&mut self) {
+        if let Some(abort) = self.peer_abort.as_mut() {
+            abort.abort();
         }
     }
 }
@@ -89,7 +101,11 @@ fn spawn_client_peer(client: &mut Client<ClientData>) {
     let tx = client.data.command_pipe.0.clone();
     let video_stream = client.data.video_sender.clone();
     let mut command_pipe = client.data.command_pipe.0.clone();
-    tokio::spawn(async move {
+
+    let (abort_handle, abort_registration) = AbortHandle::new_pair();
+    client.data.peer_abort = Some(abort_handle);
+
+    tokio::spawn(Abortable::new(async move {
         /* This locks all other access */
         loop {
             let event = futures::future::poll_fn(|cx| {
@@ -163,7 +179,7 @@ fn spawn_client_peer(client: &mut Client<ClientData>) {
 
                     //let channel = peer.lock().unwrap().create_data_channel(DataChannelType::Reliable, String::from(format!("reply - {}", channel.label())), None, 0).unwrap();
 
-                    let peer = peer.clone();
+                    let weak_peer = Arc::downgrade(&peer);
                     let video_stream = video_stream.clone();
                     tokio::spawn(async move {
                         let mut channel = channel;
@@ -181,7 +197,9 @@ fn spawn_client_peer(client: &mut Client<ClientData>) {
                                     println!("Received dc message on {}: {:?}", channel.label(), message);
                                     if let DataChannelMessage::String(Some(text)) = message {
                                         if text == "create" {
-                                            peer.lock().unwrap().add_media_sender(SdpMediaValue::Video);
+                                            if let Some(peer) = weak_peer.upgrade() {
+                                                peer.lock().unwrap().add_media_sender(SdpMediaValue::Video);
+                                            }
                                         } else if text == "rename" {
                                             if let Some(stream) = video_stream.lock().unwrap().as_mut() {
                                                 stream.sender.register_property(String::from("msid"), Some(String::from("NewChannel? -")));
@@ -211,7 +229,7 @@ fn spawn_client_peer(client: &mut Client<ClientData>) {
         }
 
         println!("Peer poll exited");
-    });
+    }, abort_registration));
 }
 
 fn send_local_description(command_pipe: &mut mpsc::UnboundedSender<WebCommand>, peer: &mut PeerConnection, mode: String) -> std::result::Result<(), String> {

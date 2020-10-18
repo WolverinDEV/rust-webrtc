@@ -53,7 +53,7 @@ pub enum PeerConnectionState {
     Connecting,
     Connected,
     Disconnecting,
-    Closed,
+    Disconnected,
     Failed
 }
 

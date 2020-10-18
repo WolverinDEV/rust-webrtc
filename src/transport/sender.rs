@@ -103,7 +103,6 @@ impl RtpSender {
     /// Retransmit a RTP packet
     pub fn retransmit_rtp(&mut self, sequence_no: u16) {
         if let Some(buffer) = self.history.resend_packet(sequence_no) {
-            println!("Retransmit: {}", sequence_no);
             self.base.write_data(buffer);
         }
     }
