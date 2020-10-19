@@ -20,6 +20,7 @@ impl RtcpPacketBye {
         if payload_type != RtcpPacketType::PayloadFeedback.value() {
             return Err(Error::new(ErrorKind::InvalidInput, "rtcp packet isn't a feedback packet"));
         }
+        let _ = reader.read_u16::<BigEndian>()?; /* the total packet length is not from interest */
 
         let src_count = (info & 0x1F) as usize;
         let mut src: Vec<u32> = Vec::with_capacity(src_count);

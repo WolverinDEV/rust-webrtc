@@ -11,3 +11,6 @@ pub use receiver_report::*;
 pub use sender_report::*;
 pub use source_description::*;
 pub use bye::*;
+
+pub mod extended_report;
+pub use extended_report::RtcpPacketExtendedReport;
