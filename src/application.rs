@@ -86,8 +86,11 @@ impl ChannelApplication {
             write_waker: None
         }));
 
-        let sctp_session = UsrSctpSession::new(SctpStream{ inner: stream.clone() }, 5000);
+        let mut sctp_session = UsrSctpSession::new(SctpStream{ inner: stream.clone() }, 5000);
         if sctp_session.is_none() { return None; }
+
+        let _ = sctp_session.as_mut().unwrap().set_linger(0)
+            .map_err(|err| eprintln!("failed to disable linger: {}", err));
 
         let (tx, rx) = mpsc::unbounded_channel();
         Some(ChannelApplication {

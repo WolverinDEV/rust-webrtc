@@ -2,7 +2,7 @@
 
 use libusrsctp_sys as ffi;
 use std::pin::Pin;
-use std::os::raw::{c_void, c_char};
+use std::os::raw::{c_void, c_char, c_int};
 use std::sync::{Mutex, Arc};
 use lazy_static::lazy_static;
 use libusrsctp_sys::{usrsctp_conninput, usrsctp_close, usrsctp_setsockopt, usrsctp_set_non_blocking, usrsctp_sendv, usrsctp_getsockopt};
@@ -23,6 +23,14 @@ pub mod sctp_macros;
 const SOL_SOCKET: i32 = 1;
 const SO_SNDBUF: i32  = 7;
 const SO_RCVBUF: i32  = 8;
+const SO_LINGER: i32 = 13;
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct struct__linger {
+    pub l_onoff: c_int,
+    pub l_linger: c_int,
+}
 
 #[allow(non_camel_case_types)]
 type size_t = usize;
@@ -362,19 +370,17 @@ impl<T: Read + Write + Unpin> UsrSctpSession<T> {
         self.socket.do_connect(self.local_port, remote_port)
     }
 
-    /* TODO: Something like connect async if we want  to use the socket in blocking mode
-    pub fn start_connect(&mut self, remote_port: u16) {
-        self.remote_port = Some(remote_port);
-
-        let mut connect = UsrSctpConnect::new(self.local_port, remote_port, self.socket.clone());
-        connect.start_connect();
-        self.connect_future = Some(connect);
-
-        if let Some(waker) = &self.poll_waker {
-            waker.wake_by_ref();
-        }
+    pub fn set_linger(&mut self, value: i32) -> Result<(), std::io::Error> {
+        let mut linger = struct__linger{
+            l_onoff: 1,
+            l_linger: value,
+        };
+        let result = unsafe {
+            usrsctp_setsockopt(self.socket.socket, SOL_SOCKET, SO_LINGER, &mut linger as *mut struct__linger as *mut c_void, std::mem::size_of::<struct__linger>() as u32)
+        };
+        if result == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
     }
-    */
+
     pub fn set_receive_buffer(&mut self, mut size: usize) -> Result<(), std::io::Error> {
         let result = unsafe {
             usrsctp_setsockopt(self.socket.socket, SOL_SOCKET, SO_RCVBUF, &mut size as *mut usize as *mut c_void, std::mem::size_of::<usize>() as u32)

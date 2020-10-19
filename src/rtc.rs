@@ -18,13 +18,15 @@ use std::net::{IpAddr, Ipv4Addr};
 use libnice::ffi::{NiceCompatibility, NiceAgentProperty};
 use libnice::sys::NiceAgentOption_NICE_AGENT_OPTION_ICE_TRICKLE;
 use crate::application::{ChannelApplication, DataChannel, ApplicationChannelEvent};
-use crate::media::{MediaLine, MediaLineParseError, InternalMediaReceiver, MediaReceiver, InternalMediaSender, InternalMediaTrack, MediaSender, NegotiationState};
+use crate::media::{MediaLine, MediaLineParseError, ActiveInternalMediaReceiver, MediaReceiver, InternalMediaSender, InternalMediaTrack, MediaSender, NegotiationState, InternalMediaReceiver};
 use crate::utils::rtp::ParsedRtpPacket;
 use crate::utils::rtcp::RtcpPacket;
 use std::ops::{DerefMut};
 use tokio::sync::mpsc;
 use crate::utils::RtpPacketResendRequester;
 use crate::sctp::message::DataChannelType;
+use crate::rtc::SignallingState::Negotiated;
+use std::future::Future;
 
 /// The default setup type if the remote peer offers active and passive setup
 /// Allowed values are only `SdpAttributeSetup::Passive` and `SdpAttributeSetup::Active`
@@ -80,8 +82,8 @@ pub struct PeerConnection {
     transport: BTreeMap<u32, Rc<RefCell<RTCTransport>>>,
     media_lines: Vec<Rc<RefCell<MediaLine>>>,
 
-    stream_receiver: BTreeMap<u32, Rc<RefCell<InternalMediaReceiver>>>,
-    stream_sender: BTreeMap<u32, Rc<RefCell<InternalMediaSender>>>,
+    stream_receiver: BTreeMap<u32, Box<dyn InternalMediaReceiver>>,
+    stream_sender: BTreeMap<u32, InternalMediaSender>,
 
     application_channel: Box<ChannelApplication>,
 
@@ -301,8 +303,7 @@ impl PeerConnection {
                         line.negotiation_state = NegotiationState::Negotiated;
                     }
                 }
-                for sender in self.stream_sender.values() {
-                    let mut sender = RefCell::borrow_mut(sender);
+                for sender in self.stream_sender.values_mut() {
                     sender.promote_negotiation(|s| matches!(s, NegotiationState::Propagated), NegotiationState::Negotiated);
                 }
 
@@ -319,17 +320,13 @@ impl PeerConnection {
     }
 
     fn update_media_line_streams(&mut self, media: &SdpMedia, media_line: &mut MediaLine, transport: &mut RTCTransport) {
-        let current_streams = self.stream_receiver.values()
-            .filter(|receiver| RefCell::borrow(receiver).track.media_line == media_line.index)
-            .map(|receiver| receiver.clone())
-            .collect::<Vec<Rc<RefCell<InternalMediaReceiver>>>>();
-
-        for receiver in current_streams.iter() {
-            let receiver = RefCell::borrow(receiver);
-            if !media_line.remote_streams.contains(&receiver.track.id) {
-                self.stream_receiver.remove(&receiver.track.id);
+        self.stream_receiver.drain_filter(|id, receiver| {
+            if receiver.track().media_line != media_line.index {
+                return false;
             }
-        }
+
+            !media_line.remote_streams.contains(id)
+        }).count();
 
         for receiver_id in media_line.remote_streams.iter() {
             if self.stream_receiver.contains_key(&receiver_id) {
@@ -341,7 +338,7 @@ impl PeerConnection {
             let (tx, rx) = mpsc::unbounded_channel();
 
             let (ctx, crx) = mpsc::unbounded_channel();
-            let mut internal_receiver = InternalMediaReceiver {
+            let mut internal_receiver = ActiveInternalMediaReceiver {
                 track: InternalMediaTrack {
                     id: *receiver_id,
                     media_line: media_line.index,
@@ -368,7 +365,7 @@ impl PeerConnection {
             };
 
             let _ = self.local_events.0.send(PeerConnectionEvent::ReceivedRemoteStream(receiver));
-            self.stream_receiver.insert(*receiver_id, Rc::new(RefCell::new(internal_receiver)));
+            self.stream_receiver.insert(*receiver_id, Box::new(internal_receiver));
         }
     }
 
@@ -407,9 +404,8 @@ impl PeerConnection {
                     let mut media = media_line.generate_local_description()
                         .ok_or(CreateAnswerError::DescribeError(media_line.index))?;
 
-                    for sender in self.stream_sender.values()
-                        .filter(|sender| RefCell::borrow(sender).track.media_line == media_line.index) {
-                        let mut sender = RefCell::borrow_mut(sender);
+                    for sender in self.stream_sender.values_mut()
+                        .filter(|sender| sender.track.media_line == media_line.index) {
                         sender.write_sdp(&mut media);
                     }
 
@@ -442,8 +438,7 @@ impl PeerConnection {
                         line.negotiation_state = NegotiationState::Propagated;
                     }
                 }
-                for sender in self.stream_sender.values() {
-                    let mut sender = RefCell::borrow_mut(sender);
+                for sender in self.stream_sender.values_mut() {
                     sender.promote_negotiation(|s| matches!(s, NegotiationState::Changed | NegotiationState::None), NegotiationState::Propagated);
                 }
                 self.signalling_state = SignallingState::HaveLocalOffer;
@@ -453,8 +448,7 @@ impl PeerConnection {
                     let mut line = RefCell::borrow_mut(line);
                     line.negotiation_state = NegotiationState::Negotiated;
                 }
-                for sender in self.stream_sender.values() {
-                    let mut sender = RefCell::borrow_mut(sender);
+                for sender in self.stream_sender.values_mut() {
                     sender.promote_negotiation(|_| true, NegotiationState::Negotiated);
                 }
                 self.signalling_state = SignallingState::Negotiated;
@@ -484,7 +478,7 @@ impl PeerConnection {
         return line;
     }
 
-    pub fn add_media_sender(&mut self, media_type: SdpMediaValue) -> Result<MediaSender, ()> {
+    pub fn add_media_sender(&mut self, media_type: SdpMediaValue) -> MediaSender {
         /* find or create a free media line */
         let media_line = self.allocate_sender_media_line(media_type);
         let mut media_line = RefCell::borrow_mut(&media_line);
@@ -501,10 +495,9 @@ impl PeerConnection {
             (transport.create_rtp_sender(), transport.create_rtcp_sender())
         );
 
-        /* TODO: Trigger renegotiation */
         media_line.local_streams.push(internal_sender.track.id);
-        self.stream_sender.insert(internal_sender.track.id, Rc::new(RefCell::new(internal_sender)));
-        Ok(sender)
+        self.stream_sender.insert(internal_sender.track.id, internal_sender);
+        sender
     }
 
     pub fn create_data_channel(&mut self, channel_type: DataChannelType, label: String, protocol: Option<String>, priority: u16) -> Result<DataChannel, String> {
@@ -631,46 +624,50 @@ impl PeerConnection {
                                 RtcpPacket::ReceiverReport(mut rr) => {
                                     let app_data = rr.profile_data.take();
                                     for (id, report) in rr.reports {
-                                        if let Some(sender) = self.stream_sender.get(&id) {
-                                            RefCell::borrow_mut(sender).handle_receiver_report(report, &app_data);
+                                        if let Some(sender) = self.stream_sender.get_mut(&id) {
+                                            sender.handle_receiver_report(report, &app_data);
                                         }
                                     }
                                 },
                                 RtcpPacket::SenderReport(sr) => {
-                                    if let Some(receiver) = self.stream_receiver.get(&sr.ssrc) {
-                                        RefCell::borrow_mut(receiver).handle_sender_report(sr);
+                                    if let Some(receiver) = self.stream_receiver.get_mut(&sr.ssrc) {
+                                        receiver.handle_sender_report(sr);
                                     } else {
                                         let _ = self.local_events.0.send(PeerConnectionEvent::UnassignableRtcpPacket(RtcpPacket::SenderReport(sr)));
                                     }
                                 },
                                 RtcpPacket::SourceDescription(sd) => {
                                     for (id, description) in sd.descriptions.iter() {
-                                        if let Some(receiver) = self.stream_receiver.get(&id) {
-                                            RefCell::borrow_mut(receiver).handle_source_description(description);
+                                        if let Some(receiver) = self.stream_receiver.get_mut(&id) {
+                                            receiver.handle_source_description(description);
                                         }
                                     }
                                 },
+                                RtcpPacket::Bye(bye) => {
+                                    eprintln!("Received bye packet: {:?}", bye);
+                                    /* TODO! */
+                                },
                                 RtcpPacket::TransportFeedback(fb) => {
-                                    if let Some(sender) = self.stream_sender.get(&fb.media_ssrc) {
-                                        RefCell::borrow_mut(sender).handle_transport_feedback(fb.feedback);
+                                    if let Some(sender) = self.stream_sender.get_mut(&fb.media_ssrc) {
+                                        sender.handle_transport_feedback(fb.feedback);
                                     } else {
                                         let _ = self.local_events.0.send(PeerConnectionEvent::UnassignableRtcpPacket(RtcpPacket::TransportFeedback(fb)));
                                     }
                                 },
                                 RtcpPacket::PayloadFeedback(pfb) => {
-                                    if let Some(sender) = self.stream_sender.get(&pfb.media_ssrc) {
-                                        RefCell::borrow_mut(sender).handle_payload_feedback(pfb.feedback);
+                                    if let Some(sender) = self.stream_sender.get_mut(&pfb.media_ssrc) {
+                                        sender.handle_payload_feedback(pfb.feedback);
                                     } else {
                                         let _ = self.local_events.0.send(PeerConnectionEvent::UnassignableRtcpPacket(RtcpPacket::PayloadFeedback(pfb)));
                                     }
                                 },
                                 RtcpPacket::Unknown(data) => {
-                                    self.stream_receiver.iter().for_each(|receiver|
-                                        RefCell::borrow_mut(receiver.1).handle_unknown_rtcp(&data)
+                                    self.stream_receiver.iter_mut().for_each(|receiver|
+                                        receiver.1.handle_unknown_rtcp(&data)
                                     );
 
-                                    self.stream_sender.iter().for_each(|receiver|
-                                        RefCell::borrow_mut(receiver.1).handle_unknown_rtcp(&data)
+                                    self.stream_sender.iter_mut().for_each(|sender|
+                                        sender.1.handle_unknown_rtcp(&data)
                                     );
                                 }
                             }
@@ -685,9 +682,8 @@ impl PeerConnection {
             RTCTransportEvent::MessageReceivedRtp(message) => {
                 match ParsedRtpPacket::new(message) {
                     Ok(reader) => {
-                        if let Some(receiver) = self.stream_receiver.get(&reader.ssrc()) {
-                            let mut receiver = RefCell::borrow_mut(receiver);
-                            if receiver.track.transport_id != ice.transport_id {
+                        if let Some(receiver) = self.stream_receiver.get_mut(&reader.ssrc()) {
+                            if receiver.track().transport_id != ice.transport_id {
                                 eprintln!("Received RTP message for receiver, but receiver isn't registered to that transport");
                             } else {
                                 receiver.handle_rtp_packet(reader);
@@ -715,22 +711,47 @@ impl PeerConnection {
     }
 
     fn poll_transceiver_control(&mut self, cx: &mut Context<'_>) {
-        for receiver in self.stream_receiver.values() {
-            RefCell::borrow_mut(receiver).poll_control(cx);
+        let removed = self.stream_receiver.drain_filter(|_, receiver| {
+            if let Poll::Ready(_) = receiver.poll_unpin(cx) {
+                true
+            } else {
+                false
+            }
+        }).collect::<Vec<_>>();
+
+        for (id, rc) in removed {
+            self.stream_receiver.insert(id, rc.into_void());
+            println!("Media stream {} receiver has no end point. Voiding it.", id);
         }
 
-        for sender in self.stream_sender.values() {
-            RefCell::borrow_mut(sender).poll_control(cx);
+        let removed = self.stream_sender.drain_filter(|_, sender| {
+            if let Poll::Ready(_) = sender.poll_unpin(cx) {
+                true
+            } else {
+                false
+            }
+        }).collect::<Vec<_>>();
+
+        for (_, sender) in removed {
+            let media_line = self.media_lines.iter()
+                .find(|line| RefCell::borrow(line).index == sender.track.media_line);
+            if media_line.is_some() {
+                let mut media_line = RefCell::borrow_mut(media_line.unwrap());
+                media_line.local_streams.retain(|e| *e != sender.track.id);
+                if media_line.negotiation_state != NegotiationState::None {
+                    media_line.negotiation_state = NegotiationState::Changed;
+                }
+            }
         }
     }
 
     fn flush_transceiver_control(&mut self) {
-        for receiver in self.stream_receiver.values() {
-            RefCell::borrow_mut(receiver).flush_control();
+        for receiver in self.stream_receiver.values_mut() {
+            receiver.flush_control();
         }
 
-        for sender in self.stream_sender.values() {
-            RefCell::borrow_mut(sender).flush_control();
+        for sender in self.stream_sender.values_mut() {
+            sender.flush_control();
         }
     }
 }
@@ -778,13 +799,13 @@ impl futures::stream::Stream for PeerConnection {
 
         if self.signalling_state == SignallingState::Negotiated {
             let mut negotiation_required = false;
-            if self.media_lines.iter()
-                .find(|e| matches!(RefCell::borrow(e).negotiation_state(), NegotiationState::None | NegotiationState::Changed))
-                .is_some() {
+            let changed_mline = self.media_lines.iter()
+                .find(|e| matches!(RefCell::borrow(e).negotiation_state(), NegotiationState::None | NegotiationState::Changed));
+            if changed_mline.is_some() {
                 negotiation_required = true;
             }
             if !negotiation_required && self.stream_sender.values()
-                .find(|e| RefCell::borrow(e).negotiation_needed()).is_some() {
+                .find(|e| e.negotiation_needed()).is_some() {
                 negotiation_required = true;
             }
             if negotiation_required {

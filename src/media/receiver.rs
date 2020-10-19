@@ -1,4 +1,4 @@
-use futures::{Stream, StreamExt};
+use futures::{Stream, StreamExt, Future};
 use tokio::sync::mpsc;
 use crate::utils::rtp::ParsedRtpPacket;
 use crate::utils::rtcp::RtcpPacket;
@@ -10,6 +10,9 @@ use crate::utils::rtcp::packets::{RtcpPacketTransportFeedback, RtcpTransportFeed
 use crate::media::{InternalMediaTrack, ControlDataSendError};
 use webrtc_sdp::media_type::SdpMedia;
 use std::collections::HashMap;
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::collections::hash_map::RandomState;
 
 /* TODO: When looking at extensions https://github.com/zxcpoiu/webrtc/blob/ea3dddf1d0880e89d84a7e502f65c65993d4169d/modules/rtp_rtcp/source/rtp_packet_received.cc#L50 */
 
@@ -83,10 +86,64 @@ impl MediaReceiver {
     }
 }
 
+pub(crate) trait InternalMediaReceiver : Future<Output = ()> + Unpin {
+    fn track(&self) -> &InternalMediaTrack;
+    fn properties(&self) -> &HashMap<String, Option<String>>;
 
-pub(crate) struct InternalMediaReceiver {
+    fn parse_properties_from_sdp(&mut self, media: &SdpMedia);
+
+    fn handle_rtp_packet(&mut self, packet: ParsedRtpPacket);
+    fn handle_sender_report(&mut self, report: RtcpPacketSenderReport);
+    fn handle_source_description(&mut self, description: &SourceDescription);
+    fn handle_unknown_rtcp(&mut self, _data: &Vec<u8>);
+
+    fn flush_control(&mut self);
+    fn into_void(self: Box<Self>) -> Box<VoidInternalMediaReceiver>;
+}
+
+pub(crate) struct VoidInternalMediaReceiver {
     pub track: InternalMediaTrack,
+    pub properties: HashMap<String, Option<String>>,
+}
 
+impl InternalMediaReceiver for VoidInternalMediaReceiver {
+    fn track(&self) -> &InternalMediaTrack {
+        &self.track
+    }
+
+    fn properties(&self) -> &HashMap<String, Option<String>, RandomState> {
+        &self.properties
+    }
+
+    fn parse_properties_from_sdp(&mut self, media: &SdpMedia) {
+        InternalMediaTrack::parse_properties_from_sdp(&mut self.properties, self.track.id, media);
+    }
+
+    fn handle_rtp_packet(&mut self, _packet: ParsedRtpPacket) {}
+
+    fn handle_sender_report(&mut self, _report: RtcpPacketSenderReport) {}
+
+    fn handle_source_description(&mut self, _description: &SourceDescription) {}
+
+    fn handle_unknown_rtcp(&mut self, _data: &Vec<u8>) {}
+
+    fn flush_control(&mut self) {}
+
+    fn into_void(self: Box<Self>) -> Box<VoidInternalMediaReceiver> {
+        unreachable!();
+    }
+}
+
+impl Future for VoidInternalMediaReceiver {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Self::Output> {
+        Poll::Pending
+    }
+}
+
+pub(crate) struct ActiveInternalMediaReceiver {
+    pub track: InternalMediaTrack,
     pub properties: HashMap<String, Option<String>>,
 
     pub event_sender: mpsc::UnboundedSender<InternalReceiverEvent>,
@@ -96,23 +153,61 @@ pub(crate) struct InternalMediaReceiver {
     pub rtcp_sender: RtcpSender,
 }
 
-impl InternalMediaReceiver {
-    pub fn handle_rtp_packet(&mut self, packet: ParsedRtpPacket) {
+impl ActiveInternalMediaReceiver {
+    fn handle_control_message(&mut self, message: InternalReceiverControl) {
+        match message {
+            InternalReceiverControl::SendRtcpPacket(packet) => {
+                self.rtcp_sender.send_rtcp(packet.as_slice());
+            },
+            InternalReceiverControl::ResetPendingResends => {
+                self.resend_requester.reset_resends();
+            }
+        }
+    }
+}
+
+impl InternalMediaReceiver for ActiveInternalMediaReceiver {
+    fn track(&self) -> &InternalMediaTrack {
+        &self.track
+    }
+
+    fn properties(&self) -> &HashMap<String, Option<String>, RandomState> {
+        &self.properties
+    }
+
+    fn parse_properties_from_sdp(&mut self, media: &SdpMedia) {
+        InternalMediaTrack::parse_properties_from_sdp(&mut self.properties, self.track.id, media);
+    }
+
+    fn handle_rtp_packet(&mut self, packet: ParsedRtpPacket) {
         self.resend_requester.handle_packet_received(u16::from(packet.sequence_number()).into());
         let _ = self.event_sender.send(InternalReceiverEvent::MediaEvent(MediaReceiverEvent::DataReceived(packet)));
     }
 
-    pub fn handle_sender_report(&mut self, _report: RtcpPacketSenderReport) {}
+    fn handle_sender_report(&mut self, _report: RtcpPacketSenderReport) {}
 
-    pub fn handle_source_description(&mut self, _description: &SourceDescription) {}
+    fn handle_source_description(&mut self, _description: &SourceDescription) {}
 
-    pub fn handle_unknown_rtcp(&mut self, _data: &Vec<u8>) {}
+    fn handle_unknown_rtcp(&mut self, _data: &Vec<u8>) {}
 
-    pub fn parse_properties_from_sdp(&mut self, media: &SdpMedia) {
-        InternalMediaTrack::parse_properties_from_sdp(&mut self.properties, self.track.id, media);
+    fn flush_control(&mut self) {
+        while let Ok(message) = self.control_receiver.try_recv() {
+            self.handle_control_message(message);
+        }
     }
 
-    pub fn poll_control(&mut self, cx: &mut Context<'_>) {
+    fn into_void(self: Box<Self>) -> Box<VoidInternalMediaReceiver> {
+        Box::new(VoidInternalMediaReceiver {
+            properties: self.properties,
+            track: self.track
+        })
+    }
+}
+
+impl Future for ActiveInternalMediaReceiver {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         while let Poll::Ready(event) = self.resend_requester.poll_next_unpin(cx) {
             let event = event.expect("unexpected stream close");
             match event {
@@ -136,24 +231,14 @@ impl InternalMediaReceiver {
         }
 
         while let Poll::Ready(message) = self.control_receiver.poll_next_unpin(cx) {
-            self.handle_control_message(message.expect("unexpected stream ending"));
-        }
-    }
-
-    pub fn flush_control(&mut self) {
-        while let Ok(message) = self.control_receiver.try_recv() {
-            self.handle_control_message(message);
-        }
-    }
-
-    fn handle_control_message(&mut self, message: InternalReceiverControl) {
-        match message {
-            InternalReceiverControl::SendRtcpPacket(packet) => {
-                self.rtcp_sender.send_rtcp(packet.as_slice());
-            },
-            InternalReceiverControl::ResetPendingResends => {
-                self.resend_requester.reset_resends();
+            if message.is_none() {
+                /* receiver consumer is gone, shutdown this receiver */
+                return Poll::Ready(());
             }
+
+            self.handle_control_message(message.unwrap());
         }
+
+        Poll::Pending
     }
 }

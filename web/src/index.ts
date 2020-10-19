@@ -51,7 +51,7 @@ async function handleMessage(data: any) {
             if(!peer) { throw "Missing peer"; }
 
             let sdp = payload.sdp.replace("\r\n\r\n", "\r\n");
-            console.log("[SDP] %s:\n%s", payload.mode, sdp);
+            console.log("[SDP] Received %s:\n%s", payload.mode, sdp);
             peer.setRemoteDescription(new RTCSessionDescription({
                 sdp: sdp.replace(/\r?\n\r?\n/g, "\n"),
                 type: payload.mode
@@ -146,8 +146,14 @@ async function initializePeerVideo(peer: RTCPeerConnection) {
             video: true
         });
     } catch (error) {
-        console.warn("Failed to get camera input, using virtual camera instead (%o)", error);
-        stream = await createVirtualCameraStream();
+        try {
+            stream = await (navigator.mediaDevices as any).getDisplayMedia({
+                video: true
+            });
+        } catch(error) {
+            console.warn("Failed to get camera input, using virtual camera instead (%o)", error);
+            stream = await createVirtualCameraStream();
+        }
     }
 
     let sender = peer.addTrack(stream.getVideoTracks()[0]);
@@ -162,7 +168,6 @@ async function initializePeerVideo(peer: RTCPeerConnection) {
     setTimeout(() => {
         console.log("Removing sender");
         peer.removeTrack(sender);
-
         setTimeout(() => {
             peer.addTrack(stream.getVideoTracks()[0]);
 
@@ -269,7 +274,7 @@ async function initializePeer() {
 
     await initializePeerApplication(peer);
 
-    const kEnableAudio = false;
+    const kEnableAudio = true;
     if(kEnableAudio) {
         await initializePeerAudio(peer);
     }
@@ -291,6 +296,7 @@ async function initializePeer() {
     /* if something changes, signal it to the remote */
     peer.onnegotiationneeded = async () => {
         console.error("Nego needed");
+        return;
 
         let offer = await peer.createOffer({
             offerToReceiveAudio: kEnableAudio,
@@ -298,16 +304,17 @@ async function initializePeer() {
         });
         await peer.setLocalDescription(offer);
 
-        console.log("[SDP] Offer:\n%s", offer.sdp);
+        console.log("[SDP] Offer (Nego):\n%s", offer.sdp);
         sendCommand("RtcSetRemoteDescription", { sdp: offer.sdp, mode: "offer" });
     }
 }
 
+const kAutoReloadRequest = false;
 async function main() {
     audioContext = new AudioContext();
     (window as any).audioContext = audioContext;
 
-    if(audioContext.state === "suspended") {
+    if(audioContext.state === "suspended" && !kAutoReloadRequest) {
         await new Promise((resolve, reject) => {
             console.error("CLICK SOMEWHERE ON THE PAGE TO CONTINUE!");
             const callback = () => {
@@ -323,3 +330,9 @@ async function main() {
     await initializePeer();
 }
 main();
+
+if(kAutoReloadRequest) {
+    setTimeout(() => {
+        location.href = location.toString();
+    }, 3000);
+}

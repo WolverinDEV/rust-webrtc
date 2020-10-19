@@ -117,6 +117,7 @@ impl RtpSender {
                 self.history.enqueue_send_packet(sequence_no, buffer[0..length].to_vec());
                 self.base.write_data(&buffer[0..length]);
             },
+            Err(PacketProtectError::BackendMissing) => { /* seems like we're not yet/anymore connected to anything */ }
             Err(error) => {
                 eprintln!("Failed to protect RTP packet: {:?}", error);
             }
@@ -169,7 +170,8 @@ impl RtcpSender {
         match self.base.protect_rtcp(buffer, length) {
             Ok(length) => {
                 self.base.write_data(&buffer[0..length]);
-            },
+            },,
+            Err(PacketProtectError::BackendMissing) => { /* seems like we're not yet/anymore connected to anything */ }
             Err(error) => {
                 eprintln!("Failed to protect RTCP packet: {:?}", error);
             }

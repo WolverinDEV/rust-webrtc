@@ -2,7 +2,7 @@
 #![feature(drain_filter)]
 #![feature(try_trait)]
 
-use futures::{StreamExt};
+use futures::{StreamExt, TryStreamExt};
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 
@@ -25,6 +25,7 @@ use web_test::application::{DataChannelEvent, DataChannelMessage};
 use web_test::utils::rtcp::RtcpPacket;
 use web_test::utils::rtcp::packets::{RtcpPacketPayloadFeedback, RtcpPayloadFeedback};
 use futures::future::{Abortable, AbortHandle};
+use crate::shared::execute_example;
 
 mod shared;
 mod video;
@@ -39,7 +40,6 @@ struct ClientData {
 
     peer: Option<Arc<Mutex<rtc::PeerConnection>>>,
     peer_abort: Option<futures::future::AbortHandle>,
-    command_pipe: (mpsc::UnboundedSender<WebCommand>, mpsc::UnboundedReceiver<WebCommand>),
 
     video_sender: Arc<Mutex<Option<VideoSender>>>
 }
@@ -50,7 +50,6 @@ impl Default for ClientData {
             event_loop: Some(MAIN_GIO_EVENT_LOOP.lock().unwrap().event_loop()),
             peer: None,
             peer_abort: None,
-            command_pipe: mpsc::unbounded_channel(),
             video_sender: Arc::new(Mutex::new(None))
         }
     }
@@ -64,31 +63,60 @@ impl Drop for ClientData {
     }
 }
 
+async fn execute_client(mut client: Client<ClientData>) {
+    futures::future::poll_fn(move |cx| {
+        /* process client events */
+        while let Poll::Ready(message) = client.poll_next_unpin(cx) {
+            if let Some(message) = message {
+                match message {
+                    ClientEvents::Connected => {
+                        println!("Remote client connected");
+                    },
+                    ClientEvents::Disconnected => {
+                        println!("Remote client disconnected (event)");
+                    },
+                    ClientEvents::CommandReceived(command) => {
+                        if let Err(error) = handle_command(&mut client, &command) {
+                            println!("Failed to handle a command: {:?}", error);
+                            client.close(Some(CloseFrame{ code: CloseCode::Invalid, reason: "command handling failed".into() }));
+                        }
+                    }
+                }
+            } else {
+                println!("client connection gone");
+                return Poll::Ready(());
+            }
+        }
+
+        /* process our own video sender */
+        let mut sender = client.data.video_sender.lock().unwrap();
+        if let Some(sender) = sender.deref_mut() {
+            while let Poll::Ready(event) = sender.sender.poll_next_unpin(cx) {
+                /* eof can't happen since we've a reference */
+                match event.as_ref().unwrap() {
+                    MediaSenderEvent::PayloadFeedbackReceived(fb) => {
+                        if *fb == RtcpPayloadFeedback::PictureLossIndication {
+                            println!("Video sender channel got pli");
+                            sender.request_pli = true;
+                        } else {
+                            println!("Video sender channel PayloadFeedbackReceived: {:?}", fb);
+                        }
+                    }
+                    _ => {
+                        println!("Video sender channel event: {:?}", event);
+                    }
+                }
+            }
+        }
+
+        Poll::Pending
+    }).await;
+}
+
 fn main() {
     initialize_webrtc();
 
-    let mut runtime = tokio::runtime::Builder::new()
-        .threaded_scheduler()
-        .enable_all()
-        .core_threads(1)
-        .max_threads(1)
-        .build().unwrap();
-
-    runtime.block_on(async move {
-        let mut server = shared::ws::Server::<ClientData>::new(String::from("127.0.0.1:1234"));
-        loop {
-            let (client, server_) = server.into_future().await;
-            server = server_;
-            if client.is_none() {
-                /* server has been closed */
-                break;
-            }
-
-            let client = client.unwrap();
-            println!("Received new client: {:?}", &client.address);
-            execute_client(client);
-        }
-    });
+    execute_example(execute_client);
 }
 
 fn spawn_client_peer(client: &mut Client<ClientData>) {
@@ -98,9 +126,8 @@ fn spawn_client_peer(client: &mut Client<ClientData>) {
     let peer = Arc::new(Mutex::new(rtc::PeerConnection::new(client.data.event_loop.clone().unwrap().get_context())));
     client.data.peer = Some(peer.clone());
 
-    let tx = client.data.command_pipe.0.clone();
     let video_stream = client.data.video_sender.clone();
-    let mut command_pipe = client.data.command_pipe.0.clone();
+    let mut command_pipe = client.command_sender.clone();
 
     let (abort_handle, abort_registration) = AbortHandle::new_pair();
     client.data.peer_abort = Some(abort_handle);
@@ -122,12 +149,12 @@ fn spawn_client_peer(client: &mut Client<ClientData>) {
             match event.unwrap() {
                 PeerConnectionEvent::LocalIceCandidate(candidate, media_id) => {
                     if let Some(candidate) = candidate {
-                        let _ = tx.send(WebCommand::RtcAddIceCandidate {
+                        let _ = command_pipe.send(WebCommand::RtcAddIceCandidate {
                             candidate: String::from("candidate:") + &candidate.to_string(),
                             media_index: media_id
                         });
                     } else {
-                        let _ = tx.send(WebCommand::RtcAddIceCandidate {
+                        let _ = command_pipe.send(WebCommand::RtcAddIceCandidate {
                             candidate: String::from(""),
                             media_index: media_id
                         });
@@ -281,7 +308,7 @@ fn handle_command(client: &mut Client<ClientData>, command: &WebCommand) -> std:
             if mode == RtcDescriptionType::Offer {
                 let mut video_sender = client.data.video_sender.lock().unwrap();
                 if video_sender.is_none() && peer.media_lines().iter().find(|e| RefCell::borrow(e).media_type != SdpMediaValue::Application).is_some() {
-                    let mut channel = peer.add_media_sender(SdpMediaValue::Video).unwrap();
+                    let mut channel = peer.add_media_sender(SdpMediaValue::Video);
                     channel.register_property(String::from("msid"), Some(String::from(format!("{} -", "VideoReplayChannel"))));
                     println!("Props: {:?}", channel.properties().deref());
                     *video_sender = Some(VideoSender{
@@ -290,7 +317,7 @@ fn handle_command(client: &mut Client<ClientData>, command: &WebCommand) -> std:
                     });
                 }
 
-                send_local_description(&mut client.data.command_pipe.0, peer.deref_mut(), String::from("answer"))?;
+                send_local_description(&mut client.command_sender, peer.deref_mut(), String::from("answer"))?;
             }
         },
         WebCommand::RtcAddIceCandidate { candidate, media_index, .. } => {
@@ -317,57 +344,4 @@ fn handle_command(client: &mut Client<ClientData>, command: &WebCommand) -> std:
     }
 
     Ok(())
-}
-
-fn execute_client(mut client: Client<ClientData>) {
-    tokio::spawn(futures::future::poll_fn(move |cx| {
-        while let Poll::Ready(message) = client.poll_next_unpin(cx) {
-            if let Some(message) = message {
-                match message {
-                    ClientEvents::Connected => {
-                        println!("Remote client connected");
-                    },
-                    ClientEvents::Disconnected => {
-                        println!("Remote client disconnected (event)");
-                    },
-                    ClientEvents::CommandReceived(command) => {
-                        if let Err(error) = handle_command(&mut client, &command) {
-                            println!("Failed to handle a command: {:?}", error);
-                            client.close(Some(CloseFrame{ code: CloseCode::Invalid, reason: "command handling failed".into() }));
-                        }
-                    }
-                }
-            } else {
-                println!("client connection gone");
-                return Poll::Ready(());
-            }
-        }
-
-        while let Poll::Ready(message) = client.data.command_pipe.1.poll_next_unpin(cx) {
-            let message = message.expect("unexpected channel close");
-            client.send_message(&message);
-        }
-
-        let mut sender = client.data.video_sender.lock().unwrap();
-        if let Some(sender) = sender.deref_mut() {
-            while let Poll::Ready(event) = sender.sender.poll_next_unpin(cx) {
-                /* eof can't happen since we've a reference */
-                match event.as_ref().unwrap() {
-                    MediaSenderEvent::PayloadFeedbackReceived(fb) => {
-                        if *fb == RtcpPayloadFeedback::PictureLossIndication {
-                            println!("Video sender channel got pli");
-                            sender.request_pli = true;
-                        } else {
-                            println!("Video sender channel PayloadFeedbackReceived: {:?}", fb);
-                        }
-                    }
-                    _ => {
-                        println!("Video sender channel event: {:?}", event);
-                    }
-                }
-            }
-        }
-
-        Poll::Pending
-    }));
 }

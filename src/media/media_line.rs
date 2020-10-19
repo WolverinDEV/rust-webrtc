@@ -220,7 +220,7 @@ impl MediaLine {
         Some(media)
     }
 
-    fn allow_setting_change(&mut self) -> bool {
+    pub fn allow_setting_change(&mut self) -> bool {
         match self.negotiation_state {
             NegotiationState::None |
             NegotiationState::Changed => { true },

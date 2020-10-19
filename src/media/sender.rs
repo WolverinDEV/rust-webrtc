@@ -5,7 +5,7 @@ use futures::{StreamExt, Stream, FutureExt};
 use std::task::Context;
 use futures::task::Poll;
 use crate::media::{InternalMediaTrack, ControlDataSendError, NegotiationState};
-use crate::utils::rtcp::packets::{RtcpTransportFeedback, RtcpPayloadFeedback, RtcpFeedbackGenericNACK};
+use crate::utils::rtcp::packets::{RtcpTransportFeedback, RtcpPayloadFeedback, RtcpFeedbackGenericNACK, RtcpPacketBye};
 use tokio::macros::support::Pin;
 use tokio::sync::mpsc::error::TryRecvError;
 use std::collections::HashMap;
@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::ops::Deref;
 use webrtc_sdp::media_type::SdpMedia;
 use rtp_rs::Seq;
+use std::future::Future;
 
 #[derive(Debug)]
 pub enum MediaSenderEvent {
@@ -180,7 +181,7 @@ pub(crate) struct InternalMediaSender {
     rtcp_sender: RtcpSender,
 
     pub events: mpsc::UnboundedSender<MediaSenderEvent>,
-    pub control: Option<mpsc::UnboundedReceiver<MediaSenderControl>>,
+    pub control: mpsc::UnboundedReceiver<MediaSenderControl>,
 }
 
 impl InternalMediaSender {
@@ -191,12 +192,15 @@ impl InternalMediaSender {
         let mut properties = MediaSenderProperties::new();
         /* A channel name is required so we add one */
         properties.properties.insert(String::from("cname"), Some(String::from(format!("{}", track.id))));
+        /* we're feeling so free to add a unique media stream as well */
+        properties.properties.insert(String::from("msid"), Some(String::from(format!("{} -", track.id))));
+
         let properties = Arc::new(Mutex::new(properties));
 
         let internal_sender = InternalMediaSender {
             track,
             events: tx,
-            control: Some(crx),
+            control: crx,
             properties: properties.clone(),
 
             rtp_sender: sender.0,
@@ -260,32 +264,9 @@ impl InternalMediaSender {
         InternalMediaTrack::write_sdp(&properties.properties, self.track.id, media);
     }
 
-    pub fn poll_control(&mut self, cx: &mut Context<'_>) {
-        let _ = self.rtp_sender.poll_unpin(cx);
-
-        while let Some(Poll::Ready(message)) = self.control.as_mut().map(|ctrl| ctrl.poll_next_unpin(cx)) {
-            if message.is_none() {
-                self.handle_close();
-                break;
-            }
-
-            self.handle_control(message.unwrap());
-        }
-    }
-
     pub fn flush_control(&mut self) {
-        loop {
-            match self.control.as_mut().map(|e| e.try_recv()) {
-                Some(Ok(message)) => self.handle_control(message),
-                Some(Err(TryRecvError::Empty)) |
-                None => {
-                    return
-                },
-                Some(Err(TryRecvError::Closed)) => {
-                    self.handle_close();
-                    return
-                },
-            }
+        while let Ok(message) = self.control.try_recv() {
+            self.handle_control(message);
         }
     }
 
@@ -304,14 +285,34 @@ impl InternalMediaSender {
         }
     }
 
-    fn handle_close(&mut self) {
-        self.control = None;
-    }
-
     fn process_generic_nack(&mut self, nack: &RtcpFeedbackGenericNACK) {
         for packet_id in nack.lost_packets() {
             self.rtp_sender.retransmit_rtp(packet_id);
         }
     }
+}
 
+impl Future for InternalMediaSender {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let _ = self.rtp_sender.poll_unpin(cx);
+
+        while let Poll::Ready(message) = self.control.poll_next_unpin(cx) {
+            if message.is_none() {
+                println!("Media sender channel closed");
+                let packet = RtcpPacket::Bye(RtcpPacketBye{
+                    reason: None,
+                    src: vec![self.track.id]
+                });
+                self.rtcp_sender.send(&packet);
+
+                return Poll::Ready(());
+            }
+
+            self.handle_control(message.unwrap());
+        }
+
+        Poll::Pending
+    }
 }

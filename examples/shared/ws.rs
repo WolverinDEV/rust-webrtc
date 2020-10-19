@@ -10,6 +10,7 @@ use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use std::ops::{DerefMut};
 use serde::export::PhantomData;
+use tokio::sync::mpsc;
 
 enum ServerState {
     Unset(),
@@ -17,24 +18,22 @@ enum ServerState {
     Listening(TcpListener)
 }
 
-pub struct Server<ClientData: Default + Unpin> {
+pub struct Server {
     pub address: String,
-    state: ServerState,
-    __phantom: PhantomData<ClientData>
+    state: ServerState
 }
 
-impl<ClientData: Default + Unpin> Server<ClientData> {
+impl Server {
     pub fn new(address: String) -> Self {
         Server {
             address,
-            state: ServerState::Unset(),
-            __phantom: Default::default()
+            state: ServerState::Unset()
         }
     }
 }
 
-impl<ClientData: Default + Unpin> Stream for Server<ClientData> {
-    type Item = Client<ClientData>;
+impl Stream for Server {
+    type Item = TcpStream;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match &mut Pin::deref_mut(&mut self).state {
@@ -64,7 +63,7 @@ impl<ClientData: Default + Unpin> Stream for Server<ClientData> {
 
                     match client.unwrap() {
                         Ok(stream) => {
-                            return Poll::Ready(Some(Client::new(stream)));
+                            return Poll::Ready(Some(stream));
                         },
                         Err(error) => {
                             eprintln!("Failed to accept new client: {:?}", error);
@@ -95,18 +94,27 @@ enum ClientSocket {
 pub struct Client<ClientData: Default + Unpin> {
     pub address: SocketAddr,
     pub data: ClientData,
+    pub command_sender: mpsc::UnboundedSender<WebCommand>,
+
     socket: ClientSocket,
+    command_sender_receiver: mpsc::UnboundedReceiver<WebCommand>
 }
 
 impl<ClientData: Default + Unpin> Client<ClientData> {
-    fn new(socket: TcpStream) -> Self {
+    pub fn new(socket: TcpStream) -> Self {
         let address = socket.peer_addr().expect("missing peer address").clone();
+        let (tx, rx) = mpsc::unbounded_channel();
+
         Client {
             address,
             socket: ClientSocket::Accepting(Box::pin(tokio_tungstenite::accept_async(socket))),
-            data: Default::default()
+            data: Default::default(),
+
+            command_sender: tx,
+            command_sender_receiver: rx
         }
     }
+
     pub fn send_message(&mut self, message: &WebCommand) {
         if let ClientSocket::Connected(stream) = &mut self.socket {
             let stream = stream.as_mut().unwrap();
@@ -215,6 +223,10 @@ impl<ClientData: Default + Unpin> Stream for Client<ClientData> {
             ClientSocket::Closed() => {
                 return Poll::Ready(None);
             }
+        }
+
+        while let Poll::Ready(command) = self.command_sender_receiver.poll_next_unpin(cx) {
+            self.send_message(&command.expect("unexpected command stream eof"));
         }
 
         Poll::Pending

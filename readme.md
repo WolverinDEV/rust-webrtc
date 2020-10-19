@@ -13,6 +13,9 @@ Required libraries:
 - usrsctp-1.dll
 
 # TODOs
+- Send EOF on media stream sender & receivers
+- Drop data if receiver endpoint has been dropped
+
 ## Application channels (DataChannel)  
 - Allowing local channels to be created without a connected peer
 - Dynamically request more data channels when exceeding the initial requested amount
