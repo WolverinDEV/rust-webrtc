@@ -170,7 +170,7 @@ impl RtcpSender {
         match self.base.protect_rtcp(buffer, length) {
             Ok(length) => {
                 self.base.write_data(&buffer[0..length]);
-            },,
+            },
             Err(PacketProtectError::BackendMissing) => { /* seems like we're not yet/anymore connected to anything */ }
             Err(error) => {
                 eprintln!("Failed to protect RTCP packet: {:?}", error);

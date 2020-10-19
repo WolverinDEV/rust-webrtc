@@ -645,7 +645,7 @@ impl PeerConnection {
                                 },
                                 RtcpPacket::Bye(bye) => {
                                     eprintln!("Received bye packet: {:?}", bye);
-                                    /* TODO! */
+                                    /* TODO: Remove remote stream(s) without nego */
                                 },
                                 RtcpPacket::TransportFeedback(fb) => {
                                     if let Some(sender) = self.stream_sender.get_mut(&fb.media_ssrc) {
@@ -660,6 +660,19 @@ impl PeerConnection {
                                     } else {
                                         let _ = self.local_events.0.send(PeerConnectionEvent::UnassignableRtcpPacket(RtcpPacket::PayloadFeedback(pfb)));
                                     }
+                                },
+                                RtcpPacket::ExtendedReport(xr) => {
+                                    /* TODO: What to do here? We can't really assign the report to any media sender/receiver... */
+                                    /*
+                                    if let Some(sender) = self.stream_sender.get_mut(&xr.ssrc) {
+                                        sender.handle_extended_report(xr);
+                                    } else if let Some(receiver) = self.stream_receiver.get_mut(&xr.ssrc) {
+                                        receiver.handle_extended_report(xr);
+                                    } else {
+                                        let _ = self.local_events.0.send(PeerConnectionEvent::UnassignableRtcpPacket(RtcpPacket::ExtendedReport(xr)));
+                                    }
+                                    */
+                                    let _ = self.local_events.0.send(PeerConnectionEvent::UnassignableRtcpPacket(RtcpPacket::ExtendedReport(xr)));
                                 },
                                 RtcpPacket::Unknown(data) => {
                                     self.stream_receiver.iter_mut().for_each(|receiver|

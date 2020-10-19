@@ -6,7 +6,7 @@ use crate::transport::{RtcpSender};
 use futures::task::{Context, Poll};
 use tokio::macros::support::Pin;
 use crate::utils::{RtpPacketResendRequester, RtpPacketResendRequesterEvent};
-use crate::utils::rtcp::packets::{RtcpPacketTransportFeedback, RtcpTransportFeedback, RtcpPacketSenderReport, SourceDescription};
+use crate::utils::rtcp::packets::{RtcpPacketTransportFeedback, RtcpTransportFeedback, RtcpPacketSenderReport, SourceDescription, RtcpPacketExtendedReport};
 use crate::media::{InternalMediaTrack, ControlDataSendError};
 use webrtc_sdp::media_type::SdpMedia;
 use std::collections::HashMap;
@@ -95,6 +95,7 @@ pub(crate) trait InternalMediaReceiver : Future<Output = ()> + Unpin {
     fn handle_rtp_packet(&mut self, packet: ParsedRtpPacket);
     fn handle_sender_report(&mut self, report: RtcpPacketSenderReport);
     fn handle_source_description(&mut self, description: &SourceDescription);
+    fn handle_extended_report(&mut self, report: RtcpPacketExtendedReport);
     fn handle_unknown_rtcp(&mut self, _data: &Vec<u8>);
 
     fn flush_control(&mut self);
@@ -124,6 +125,8 @@ impl InternalMediaReceiver for VoidInternalMediaReceiver {
     fn handle_sender_report(&mut self, _report: RtcpPacketSenderReport) {}
 
     fn handle_source_description(&mut self, _description: &SourceDescription) {}
+
+    fn handle_extended_report(&mut self, report: RtcpPacketExtendedReport) {}
 
     fn handle_unknown_rtcp(&mut self, _data: &Vec<u8>) {}
 
@@ -187,6 +190,8 @@ impl InternalMediaReceiver for ActiveInternalMediaReceiver {
     fn handle_sender_report(&mut self, _report: RtcpPacketSenderReport) {}
 
     fn handle_source_description(&mut self, _description: &SourceDescription) {}
+
+    fn handle_extended_report(&mut self, _report: RtcpPacketExtendedReport) { }
 
     fn handle_unknown_rtcp(&mut self, _data: &Vec<u8>) {}
 

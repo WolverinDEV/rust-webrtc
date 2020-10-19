@@ -5,7 +5,7 @@ use futures::{StreamExt, Stream, FutureExt};
 use std::task::Context;
 use futures::task::Poll;
 use crate::media::{InternalMediaTrack, ControlDataSendError, NegotiationState};
-use crate::utils::rtcp::packets::{RtcpTransportFeedback, RtcpPayloadFeedback, RtcpFeedbackGenericNACK, RtcpPacketBye};
+use crate::utils::rtcp::packets::{RtcpTransportFeedback, RtcpPayloadFeedback, RtcpFeedbackGenericNACK, RtcpPacketBye, RtcpPacketExtendedReport};
 use tokio::macros::support::Pin;
 use tokio::sync::mpsc::error::TryRecvError;
 use std::collections::HashMap;
@@ -24,6 +24,7 @@ pub enum MediaSenderEvent {
     ReceiverReportReceived(RtcpReportBlock),
     TransportFeedbackReceived(RtcpTransportFeedback),
     PayloadFeedbackReceived(RtcpPayloadFeedback),
+    ExtendedReportReceived(RtcpPacketExtendedReport)
 }
 
 pub(crate) enum MediaSenderControl {
@@ -252,6 +253,11 @@ impl InternalMediaSender {
     pub fn handle_payload_feedback(&mut self, feedback: RtcpPayloadFeedback) {
 
         let _ = self.events.send(MediaSenderEvent::PayloadFeedbackReceived(feedback));
+    }
+
+    pub fn handle_extended_report(&mut self, report: RtcpPacketExtendedReport) {
+
+        let _ = self.events.send(MediaSenderEvent::ExtendedReportReceived(report));
     }
 
     pub fn handle_unknown_rtcp(&mut self, data: &Vec<u8>) {

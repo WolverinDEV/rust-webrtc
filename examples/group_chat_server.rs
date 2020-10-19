@@ -363,7 +363,9 @@ fn execute_client_peer(client: Arc<Mutex<Client<ClientData>>>, locked_client: &m
                     println!("Received remote data channel: {}", channel.label());
                 },
                 PeerConnectionEvent::UnassignableRtpPacket(_packet) => { },
-                PeerConnectionEvent::UnassignableRtcpPacket(_packet) => { },
+                PeerConnectionEvent::UnassignableRtcpPacket(packet) => {
+                    //eprintln!("Unassignable RTCP packet: {:?}", packet);
+                },
                 PeerConnectionEvent::NegotiationNeeded => {
                     eprintln!("Negotiation needed");
 
