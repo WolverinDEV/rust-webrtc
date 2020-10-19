@@ -67,11 +67,11 @@ impl RtcpPacketBye {
                 return Err(Error::new(ErrorKind::InvalidData, "reason too long"));
             }
             writer.write_u8(reason.len() as u8)?;
-            writer.write_all(reason.as_bytes());
+            writer.write_all(reason.as_bytes())?;
 
             let mut bytes = reason.len();
             while (bytes & 3) != 0 {
-                writer.write_u8(0);
+                writer.write_u8(0)?;
                 bytes = bytes + 1;
             }
         }

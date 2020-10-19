@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use libnice::ice::{ComponentState, Candidate, ComponentWriter};
 use tokio::sync::mpsc;
 use std::pin::Pin;
@@ -139,8 +137,8 @@ pub struct RTCTransport {
     pub local_credentials: ICECredentials,
     pub remote_credentials: ICECredentials,
 
-    certificate: x509::X509,
-    private_key: pkey::PKey<pkey::Private>,
+    //certificate: x509::X509,
+    //private_key: pkey::PKey<pkey::Private>,
     pub fingerprint: SdpAttributeFingerprint,
 
     pub setup: SdpAttributeSetup,
@@ -168,7 +166,7 @@ pub struct RTCTransport {
 
 static TRANSPORT_ID_INDEX: AtomicU32 = AtomicU32::new(1);
 impl RTCTransport {
-    fn generate_ssl_components() -> Result<(pkey::PKey<pkey::Private>, x509::X509, SdpAttributeFingerprint, ssl::Ssl), RTCTransportInitializeError> {
+    fn generate_ssl_components() -> Result<(SdpAttributeFingerprint, ssl::Ssl), RTCTransportInitializeError> {
         let private_key = rsa::Rsa::generate_with_e(4096, &BigNum::from_u32(0x10001u32).unwrap())
             .map_err(|stack| RTCTransportInitializeError::PrivateKeyGenFailed {stack})?;
 
@@ -239,7 +237,7 @@ impl RTCTransport {
         let ssl = ssl::Ssl::new(&ctx)
             .map_err(|stack| RTCTransportInitializeError::SslInitFailed { stack })?;
 
-        Ok((private_key, certificate, fingerprint, ssl))
+        Ok((fingerprint, ssl))
     }
 
     pub fn new(mut stream: libnice::ice::Stream,
@@ -250,7 +248,7 @@ impl RTCTransport {
         assert_eq!(stream.components().len(), 1, "expected only one stream component");
 
 
-        let (private_key, certificate, fingerprint, ssl) = RTCTransport::generate_ssl_components()?;
+        let (fingerprint, ssl) = RTCTransport::generate_ssl_components()?;
         stream.set_remote_credentials(CString::new(remote_credentials.username.clone()).unwrap(), CString::new(remote_credentials.password.clone()).unwrap());
 
         let dtls_stream = DtlsStreamSource{
@@ -277,8 +275,8 @@ impl RTCTransport {
                 password: String::from(stream.get_local_pwd())
             },
 
-            certificate,
-            private_key,
+            //certificate,
+            //private_key,
             fingerprint,
 
             setup,

@@ -2,33 +2,29 @@
 #![feature(drain_filter)]
 #![feature(try_trait)]
 
-use futures::{StreamExt, TryStreamExt};
+use futures::{StreamExt};
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 
 use webrtc_sdp::parse_sdp;
-use webrtc_sdp::attribute_type::{SdpAttribute, SdpAttributeRtcpFbType};
+use webrtc_sdp::attribute_type::{SdpAttribute};
 use std::sync::{Arc, Mutex};
-use std::ops::{DerefMut, Deref};
+use std::ops::{DerefMut};
 use std::str::FromStr;
 use futures::task::{Poll, Waker};
 use tokio::sync::mpsc;
 use web_test::{rtc, initialize_webrtc};
 use web_test::rtc::{PeerConnection, PeerConnectionEvent, RtcDescriptionType};
-use web_test::media::{MediaSender, MediaReceiverEvent, Codec, MediaSenderEvent, CodecFeedback, MediaReceiver};
+use web_test::media::{MediaSender, MediaReceiverEvent, Codec, MediaSenderEvent, MediaReceiver};
 use crate::shared::gio::MAIN_GIO_EVENT_LOOP;
 use crate::shared::ws::{WebCommand, Client, ClientEvents};
-use rtp_rs::Seq;
 use webrtc_sdp::media_type::SdpMediaValue;
 use std::cell::RefCell;
-use web_test::application::{DataChannelEvent, DataChannelMessage};
 use web_test::utils::rtcp::RtcpPacket;
 use web_test::utils::rtcp::packets::{RtcpPacketPayloadFeedback, RtcpPayloadFeedback};
 use futures::future::{Abortable, AbortHandle};
 use crate::shared::execute_example;
-use std::collections::{VecDeque, LinkedList, HashMap};
-use web_test::transport::RtpSender;
-use tokio::net::TcpStream;
+use std::collections::{LinkedList, HashMap};
 use lazy_static::lazy_static;
 use std::rc::Rc;
 use std::borrow::BorrowMut;
@@ -50,7 +46,6 @@ lazy_static! {
 
 struct ClientData {
     client_id: u32,
-    event_loop: Option<glib::MainLoop>,
 
     peer: rtc::PeerConnection,
     peer_abort: Option<futures::future::AbortHandle>,
@@ -78,7 +73,6 @@ impl Default for ClientData {
         let event_context = event_loop.get_context();
         ClientData {
             client_id: 0,
-            event_loop: Some(event_loop),
             peer: PeerConnection::new(event_context),
             peer_abort: None,
 
@@ -128,7 +122,6 @@ async fn execute_client(client: Client<ClientData>){
                         println!("Remote client disconnected (event)");
                     },
                     ClientEvents::CommandReceived(command) => {
-                        client.lock().unwrap();
                         if let Err(error) = handle_command(client.clone(), &command) {
                             println!("Failed to handle a command: {:?}", error);
                             client.lock().unwrap().close(Some(CloseFrame{ code: CloseCode::Invalid, reason: "command handling failed".into() }));
@@ -245,7 +238,7 @@ fn broadcast_client_media(client: Arc<Mutex<Client<ClientData>>>, locked_client:
             if request_pli {
                 receiver.reset_pending_resends();
                 let id = receiver.id;
-                receiver.send_control(RtcpPacket::PayloadFeedback(RtcpPacketPayloadFeedback{
+                let _ = receiver.send_control(RtcpPacket::PayloadFeedback(RtcpPacketPayloadFeedback{
                     ssrc: 1,
                     media_ssrc: id,
                     feedback: RtcpPayloadFeedback::PictureLossIndication
@@ -329,7 +322,7 @@ fn execute_client_peer(client: Arc<Mutex<Client<ClientData>>>, locked_client: &m
                 },
                 PeerConnectionEvent::ReceivedRemoteStream(receiver) => {
                     let mut locked_client = client.lock().unwrap();
-                    let mut peer = &mut locked_client.data.peer;
+                    let peer = &mut locked_client.data.peer;
                     let media_line = peer.media_lines().iter()
                         .find(|line| RefCell::borrow(line).index == receiver.media_line)
                         .map(|e| e.clone()).unwrap();
@@ -363,7 +356,7 @@ fn execute_client_peer(client: Arc<Mutex<Client<ClientData>>>, locked_client: &m
                     println!("Received remote data channel: {}", channel.label());
                 },
                 PeerConnectionEvent::UnassignableRtpPacket(_packet) => { },
-                PeerConnectionEvent::UnassignableRtcpPacket(packet) => {
+                PeerConnectionEvent::UnassignableRtcpPacket(_packet) => {
                     //eprintln!("Unassignable RTCP packet: {:?}", packet);
                 },
                 PeerConnectionEvent::NegotiationNeeded => {

@@ -17,9 +17,3 @@ pub fn initialize_webrtc() {
     srtp2_global_init().expect("srtp2 init failed");
     openssl::init();
 }
-
-pub fn test() {
-    let mut x = Box::new(2);
-    let mut px = &mut x;
-    *px = Box::new(**px);
-}

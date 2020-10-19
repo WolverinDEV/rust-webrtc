@@ -10,8 +10,6 @@ use crate::utils::rtcp::packets::{RtcpPacketTransportFeedback, RtcpTransportFeed
 use crate::media::{InternalMediaTrack, ControlDataSendError};
 use webrtc_sdp::media_type::SdpMedia;
 use std::collections::HashMap;
-use std::cell::RefCell;
-use std::rc::Rc;
 use std::collections::hash_map::RandomState;
 
 /* TODO: When looking at extensions https://github.com/zxcpoiu/webrtc/blob/ea3dddf1d0880e89d84a7e502f65c65993d4169d/modules/rtp_rtcp/source/rtp_packet_received.cc#L50 */
@@ -126,7 +124,7 @@ impl InternalMediaReceiver for VoidInternalMediaReceiver {
 
     fn handle_source_description(&mut self, _description: &SourceDescription) {}
 
-    fn handle_extended_report(&mut self, report: RtcpPacketExtendedReport) {}
+    fn handle_extended_report(&mut self, _report: RtcpPacketExtendedReport) {}
 
     fn handle_unknown_rtcp(&mut self, _data: &Vec<u8>) {}
 

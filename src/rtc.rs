@@ -25,8 +25,6 @@ use std::ops::{DerefMut};
 use tokio::sync::mpsc;
 use crate::utils::RtpPacketResendRequester;
 use crate::sctp::message::DataChannelType;
-use crate::rtc::SignallingState::Negotiated;
-use std::future::Future;
 
 /// The default setup type if the remote peer offers active and passive setup
 /// Allowed values are only `SdpAttributeSetup::Passive` and `SdpAttributeSetup::Active`

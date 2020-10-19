@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::io::{ Cursor, Result };
 use byteorder::ReadBytesExt;
 use std::fmt::Debug;

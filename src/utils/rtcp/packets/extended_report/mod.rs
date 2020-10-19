@@ -11,8 +11,8 @@
 /// :                         report blocks                         :
 /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 
-use std::io::{Cursor, Result, Error, ErrorKind, Read, Write};
-use byteorder::{ReadBytesExt, BigEndian, WriteBytesExt};
+use std::io::{Cursor, Result, Error, ErrorKind, Read};
+use byteorder::{ReadBytesExt, BigEndian};
 use crate::utils::rtcp::RtcpPacketType;
 
 mod target_bitrate;

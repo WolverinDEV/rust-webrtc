@@ -2,12 +2,12 @@
 #![feature(drain_filter)]
 #![feature(try_trait)]
 
-use futures::{StreamExt, TryStreamExt};
+use futures::{StreamExt};
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 
 use webrtc_sdp::parse_sdp;
-use webrtc_sdp::attribute_type::{SdpAttribute, SdpAttributeRtcpFbType};
+use webrtc_sdp::attribute_type::{SdpAttribute};
 use std::sync::{Arc, Mutex};
 use std::ops::{DerefMut, Deref};
 use std::str::FromStr;
@@ -15,10 +15,9 @@ use futures::task::{Poll};
 use tokio::sync::mpsc;
 use web_test::{rtc, initialize_webrtc};
 use web_test::rtc::{PeerConnection, PeerConnectionEvent, RtcDescriptionType};
-use web_test::media::{MediaSender, MediaReceiverEvent, Codec, MediaSenderEvent, CodecFeedback};
+use web_test::media::{MediaSender, MediaReceiverEvent, Codec, MediaSenderEvent};
 use crate::shared::gio::MAIN_GIO_EVENT_LOOP;
 use crate::shared::ws::{WebCommand, Client, ClientEvents};
-use rtp_rs::Seq;
 use webrtc_sdp::media_type::SdpMediaValue;
 use std::cell::RefCell;
 use web_test::application::{DataChannelEvent, DataChannelMessage};
@@ -186,7 +185,7 @@ fn spawn_client_peer(client: &mut Client<ClientData>) {
                                         if stream.request_pli {
                                             stream.request_pli = false;
                                             receiver.reset_pending_resends();
-                                            receiver.send_control(RtcpPacket::PayloadFeedback(RtcpPacketPayloadFeedback{
+                                            let _ = receiver.send_control(RtcpPacket::PayloadFeedback(RtcpPacketPayloadFeedback{
                                                 ssrc: stream.sender.id,
                                                 media_ssrc: receiver.id,
                                                 feedback: RtcpPayloadFeedback::PictureLossIndication
@@ -232,7 +231,7 @@ fn spawn_client_peer(client: &mut Client<ClientData>) {
                                                 stream.sender.register_property(String::from("msid"), Some(String::from("NewChannel? -")));
                                             }
                                         }
-                                        channel.send_text_message(Some(text));
+                                        let _ = channel.send_text_message(Some(text));
                                     }
                                 },
                                 DataChannelEvent::StateChanged(state) => {

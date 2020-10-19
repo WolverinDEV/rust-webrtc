@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use num::Bounded;
 use std::ops::{Add, Sub};
 use num::traits::WrappingAdd;

@@ -7,7 +7,6 @@ use futures::task::Poll;
 use crate::media::{InternalMediaTrack, ControlDataSendError, NegotiationState};
 use crate::utils::rtcp::packets::{RtcpTransportFeedback, RtcpPayloadFeedback, RtcpFeedbackGenericNACK, RtcpPacketBye, RtcpPacketExtendedReport};
 use tokio::macros::support::Pin;
-use tokio::sync::mpsc::error::TryRecvError;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::ops::Deref;
@@ -121,7 +120,7 @@ impl MediaSender {
 
         let mut buffer = unsafe { std::mem::MaybeUninit::<[u8; 2048]>::uninit().assume_init() };
         let size = packet.build_into_unchecked(&mut buffer);
-        self.control.send(MediaSenderControl::SendRtpData(sequence_no, buffer[0..size].to_vec()));
+        let _ = self.control.send(MediaSenderControl::SendRtpData(sequence_no, buffer[0..size].to_vec()));
     }
 
     pub fn send_control(&mut self, packet: RtcpPacket) -> Result<(), ControlDataSendError> {
@@ -255,6 +254,7 @@ impl InternalMediaSender {
         let _ = self.events.send(MediaSenderEvent::PayloadFeedbackReceived(feedback));
     }
 
+    #[allow(dead_code)]
     pub fn handle_extended_report(&mut self, report: RtcpPacketExtendedReport) {
 
         let _ = self.events.send(MediaSenderEvent::ExtendedReportReceived(report));
