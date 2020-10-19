@@ -142,6 +142,7 @@ pub enum RtcpPacketType {
     SenderReport,
     ReceiverReport,
     SourceDescription,
+    Bye,
 
     TransportFeedback,
     PayloadFeedback
@@ -153,6 +154,7 @@ impl RtcpPacketType {
             200 => Some(RtcpPacketType::SenderReport),
             201 => Some(RtcpPacketType::ReceiverReport),
             202 => Some(RtcpPacketType::SourceDescription),
+            203 => Some(RtcpPacketType::Bye),
             205 => Some(RtcpPacketType::TransportFeedback),
             206 => Some(RtcpPacketType::PayloadFeedback),
             _ => None
@@ -164,6 +166,7 @@ impl RtcpPacketType {
             RtcpPacketType::SenderReport => 200,
             RtcpPacketType::ReceiverReport => 201,
             RtcpPacketType::SourceDescription => 202,
+            RtcpPacketType::Bye => 203,
             RtcpPacketType::TransportFeedback => 205,
             RtcpPacketType::PayloadFeedback => 206,
         }
@@ -175,6 +178,7 @@ pub enum RtcpPacket {
     SenderReport(packets::RtcpPacketSenderReport),
     ReceiverReport(packets::RtcpPacketReceiverReport),
     SourceDescription(packets::RtcpPacketSourceDescription),
+    Bye(packets::RtcpPacketBye),
     TransportFeedback(packets::RtcpPacketTransportFeedback),
     PayloadFeedback(packets::RtcpPacketPayloadFeedback),
 
@@ -225,6 +229,7 @@ impl RtcpPacket {
                     RtcpPacketType::SenderReport => Ok(RtcpPacket::SenderReport(packets::RtcpPacketSenderReport::parse(&mut reader)?)),
                     RtcpPacketType::ReceiverReport => Ok(RtcpPacket::ReceiverReport(packets::RtcpPacketReceiverReport::parse(&mut reader)?)),
                     RtcpPacketType::SourceDescription => Ok(RtcpPacket::SourceDescription(packets::RtcpPacketSourceDescription::parse(&mut reader)?)),
+                    RtcpPacketType::Bye => Ok(RtcpPacket::Bye(packets::RtcpPacketBye::parse(&mut reader)?)),
                     RtcpPacketType::TransportFeedback => Ok(RtcpPacket::TransportFeedback(packets::RtcpPacketTransportFeedback::parse(&mut reader)?)),
                     RtcpPacketType::PayloadFeedback => Ok(RtcpPacket::PayloadFeedback(packets::RtcpPacketPayloadFeedback::parse(&mut reader)?)),
                 }
@@ -241,6 +246,7 @@ impl RtcpPacket {
             RtcpPacket::SenderReport(report) => report.write(&mut writer),
             RtcpPacket::ReceiverReport(report) => report.write(&mut writer),
             RtcpPacket::SourceDescription(report) => report.write(&mut writer),
+            RtcpPacket::Bye(bye) => bye.write(&mut writer),
             RtcpPacket::TransportFeedback(report) => report.write(&mut writer),
             RtcpPacket::PayloadFeedback(report) => report.write(&mut writer),
             RtcpPacket::Unknown(payload) => writer.write_all(payload),
