@@ -360,12 +360,12 @@ impl RTCTransport {
             RTPTransportSetup::Holdconn =>    media.add_attribute(SdpAttribute::Setup(SdpAttributeSetup::Holdconn))?,
         }
         for candidate in self.local_candidates.iter() {
-            media.add_attribute(SdpAttribute::Candidate(candidate.deref().clone()));
+            media.add_attribute(SdpAttribute::Candidate(candidate.deref().clone()))?;
         }
         Ok(())
     }
 
-    pub fn apply_remote_description(&mut self, media_line: u32, media: &SdpMedia) -> Result<(), RTCTransportDescriptionApplyError> {
+    pub fn apply_remote_description(&mut self, _media_line: u32, media: &SdpMedia) -> Result<(), RTCTransportDescriptionApplyError> {
         let username = if let Some(SdpAttribute::IceUfrag(username)) = media.get_attribute(SdpAttributeType::IceUfrag) {
             username
         } else {
@@ -430,7 +430,7 @@ impl RTCTransport {
             debug_assert!(matches!(self.setup, RTPTransportSetup::Active | RTPTransportSetup::Passive | RTPTransportSetup::Holdconn));
 
             if let Some(stream) = &mut self.ice_stream {
-                let mut remote_state = self.remote_state.as_ref().unwrap();
+                let remote_state = self.remote_state.as_ref().unwrap();
                 stream.set_remote_credentials(CString::new(remote_state.credentials.username.clone()).unwrap(), CString::new(remote_state.credentials.password.clone()).unwrap())
             }
 
@@ -464,7 +464,7 @@ impl RTCTransport {
             }
             */
         } else {
-            let remote_state = self.remote_state.as_ref().unwrap();
+            let _remote_state = self.remote_state.as_ref().unwrap();
             /* we're already connected, check if we're matching */
             /* TODO: Check if attributes match! */
             /* TODO: Check candidates? */

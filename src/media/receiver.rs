@@ -97,7 +97,8 @@ pub(crate) trait InternalMediaReceiver : Future<Output = ()> + Unpin {
     fn handle_extended_report(&mut self, report: RtcpPacketExtendedReport);
     fn handle_unknown_rtcp(&mut self, _data: &Vec<u8>);
 
-    fn flush_control(&mut self);
+    /// Return true if the receiver has been deleted
+    fn flush_control(&mut self) -> bool;
     fn into_void(self: Box<Self>) -> Box<VoidInternalMediaReceiver>;
 }
 
@@ -129,7 +130,7 @@ impl InternalMediaReceiver for VoidInternalMediaReceiver {
 
     fn handle_unknown_rtcp(&mut self, _data: &Vec<u8>) {}
 
-    fn flush_control(&mut self) {}
+    fn flush_control(&mut self) -> bool { false }
 
     fn into_void(self: Box<Self>) -> Box<VoidInternalMediaReceiver> {
         unreachable!();
@@ -194,9 +195,13 @@ impl InternalMediaReceiver for ActiveInternalMediaReceiver {
 
     fn handle_unknown_rtcp(&mut self, _data: &Vec<u8>) {}
 
-    fn flush_control(&mut self) {
-        while let Ok(message) = self.control_receiver.try_recv() {
-            self.handle_control_message(message);
+    fn flush_control(&mut self) -> bool {
+        loop {
+            match self.control_receiver.try_recv() {
+                Ok(message) => self.handle_control_message(message),
+                Err(mpsc::error::TryRecvError::Closed) => return true,
+                _ => return false
+            }
         }
     }
 

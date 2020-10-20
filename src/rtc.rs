@@ -393,7 +393,9 @@ impl PeerConnection {
         }
 
         /* flush all pending stream modifications */
-        self.flush_transceiver_control();
+        self.poll_stream_receiver(|receiver| receiver.flush_control());
+        self.poll_stream_sender(|sender| RefCell::borrow_mut(sender).flush_control());
+
         let mut registered_media_lines = self.media_lines.iter()
             .filter_map(|e| RefCell::borrow(e).sdp_index().map(|index| (index, e.clone())))
             .collect::<Vec<_>>();
@@ -551,7 +553,7 @@ impl PeerConnection {
         if let Some(media_line) = self.media_line_by_sdp_index(media_line_index) {
             let media_line = RefCell::borrow(&media_line);
 
-            let mut ice_transport = self.transport.get_mut(&media_line.transport_id);
+            let ice_transport = self.transport.get_mut(&media_line.transport_id);
             if let Some(transport) = ice_transport {
                 let mut transport = RefCell::borrow_mut(transport);
 
@@ -769,27 +771,21 @@ impl PeerConnection {
 
     }
 
-    fn poll_transceiver_control(&mut self, cx: &mut Context<'_>) {
-        let removed = self.stream_receiver.drain_filter(|_, receiver| {
-            if let Poll::Ready(_) = receiver.poll_unpin(cx) {
-                true
-            } else {
-                false
-            }
-        }).collect::<Vec<_>>();
+    fn poll_stream_receiver<F>(&mut self, poll_fn: F)
+        where F: Fn(&mut Box<dyn InternalMediaReceiver>) -> bool
+    {
+        let removed = self.stream_receiver.drain_filter(|_, receiver| poll_fn(receiver)).collect::<Vec<_>>();
 
         for (id, rc) in removed {
             self.stream_receiver.insert(id, rc.into_void());
             println!("Media stream {} receiver has no end point. Voiding it.", id);
         }
+    }
 
-        let removed = self.stream_sender.drain_filter(|_, sender| {
-            if let Poll::Ready(_) = RefCell::borrow_mut(sender).poll_unpin(cx) {
-                true
-            } else {
-                false
-            }
-        }).collect::<Vec<_>>();
+    fn poll_stream_sender<F>(&mut self, poll_fn: F)
+        where F: Fn(&mut RefCell<InternalMediaSender>) -> bool
+    {
+        let removed = self.stream_sender.drain_filter(|_, sender| poll_fn(sender)).collect::<Vec<_>>();
 
         for (_, sender) in removed {
             let sender = RefCell::borrow(&sender);
@@ -797,20 +793,19 @@ impl PeerConnection {
             if let Some(media_line) = media_line {
                 let mut media_line = RefCell::borrow_mut(&media_line);
                 media_line.local_streams.retain(|e| *e != sender.track.id);
+                if media_line.local_streams.is_empty() && media_line.remote_streams.is_empty() && media_line.sdp_index().is_none() {
+                    /* safely remove that line */
+                    if let Some(index) = self.media_lines.iter().position(|e| RefCell::borrow(e).unique_id() == media_line.unique_id()) {
+                        /* fully remove that media line, no need to keep it */
+                        self.media_lines.remove(index);
+                    }
+                }
+
+                /* Change the state, even if the media line has been removed. Should have no impact. */
                 if media_line.negotiation_state != NegotiationState::None {
                     media_line.negotiation_state = NegotiationState::Changed;
                 }
             }
-        }
-    }
-
-    fn flush_transceiver_control(&mut self) {
-        for receiver in self.stream_receiver.values_mut() {
-            receiver.flush_control();
-        }
-
-        for sender in self.stream_sender.values() {
-            RefCell::borrow_mut(sender).flush_control();
         }
     }
 }
@@ -825,7 +820,8 @@ impl futures::stream::Stream for PeerConnection {
             return Poll::Ready(Some(message.expect("unexpected local event stream close")));
         }
 
-        self.poll_transceiver_control(cx);
+        self.poll_stream_receiver(|receiver| if let Poll::Ready(_) = receiver.poll_unpin(&mut Context::from_waker(cx.waker())) { true } else { false });
+        self.poll_stream_sender(|sender| if let Poll::Ready(_) = RefCell::borrow_mut(sender).poll_unpin(&mut Context::from_waker(cx.waker())) { true } else { false });
 
         while let Poll::Ready(event) = self.application_channel.poll_next_unpin(cx) {
             let event = event.expect("unexpected stream end");

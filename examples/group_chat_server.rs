@@ -28,6 +28,7 @@ use std::collections::{LinkedList, HashMap};
 use lazy_static::lazy_static;
 use std::rc::Rc;
 use std::borrow::BorrowMut;
+#[allow(unused_imports)]
 use std::mem::forget;
 
 mod shared;
@@ -432,14 +433,12 @@ fn handle_command(client: Arc<Mutex<Client<ClientData>>>, command: &WebCommand) 
                     RtcDescriptionType::Answer
                 }
             };
-            /*
             /* Testing media sender adding before the peer has been initialized */
             if mode == RtcDescriptionType::Offer {
                 let mut stream = locked_client.data.peer.add_media_sender(SdpMediaValue::Video);
                 stream.register_property(String::from("msid"), Some(String::from("PreICETest -")));
-                forget(stream);
+                //forget(stream);
             }
-            */
 
             locked_client.data.peer.set_remote_description(&sdp, &mode).map_err(|err| format!("{:?}", err))?;
 

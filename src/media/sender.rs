@@ -270,13 +270,18 @@ impl InternalMediaSender {
         InternalMediaTrack::write_sdp(&properties.properties, self.track.id, media);
     }
 
-    pub fn flush_control(&mut self) {
-        while let Ok(message) = self.control.try_recv() {
-            self.handle_control(message);
+    /// Returns true if the sender has reached his end of life
+    pub fn flush_control(&mut self) -> bool {
+        loop {
+            match self.control.try_recv() {
+                Ok(message) => self.handle_control_message(message),
+                Err(mpsc::error::TryRecvError::Closed) => return true,
+                _ => return false
+            }
         }
     }
 
-    fn handle_control(&mut self, message: MediaSenderControl) {
+    fn handle_control_message(&mut self, message: MediaSenderControl) {
         match message {
             MediaSenderControl::SendRtpData(sequence, data) => {
                 /* TODO: Statistics */
@@ -316,7 +321,7 @@ impl Future for InternalMediaSender {
                 return Poll::Ready(());
             }
 
-            self.handle_control(message.unwrap());
+            self.handle_control_message(message.unwrap());
         }
 
         Poll::Pending
