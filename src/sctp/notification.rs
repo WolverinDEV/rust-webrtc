@@ -2,8 +2,6 @@ use std::io::{Result, Error, ErrorKind, Cursor};
 use byteorder::{ReadBytesExt, LittleEndian};
 use crate::sctp::sctp_macros::{SCTP_COMM_UP, SCTP_COMM_LOST, SCTP_RESTART, SCTP_SHUTDOWN_COMP, SCTP_CANT_STR_ASSOC};
 
-/* TODO: Wrapper for all notifications? */
-
 #[derive(Debug, PartialEq)]
 pub struct SctpNotificationStreamReset {
     /// See `SCTP_STREAM_*` elements within sctp_macros

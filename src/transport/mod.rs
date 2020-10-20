@@ -796,7 +796,7 @@ impl Stream for RTCTransport {
             match message {
                 RTCTransportControl::SendMessage(buffer) => {
                     if let Some(DTLSState::Connected(stream)) = &mut self.dtls {
-                        /* TODO: better error handling? */
+                        /* TODO: Is it possible, that this even happens? */
                         stream.write(&buffer)
                             .expect("failed to send message via dtls");
                     } else {

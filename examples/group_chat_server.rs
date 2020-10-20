@@ -435,7 +435,7 @@ fn handle_command(client: Arc<Mutex<Client<ClientData>>>, command: &WebCommand) 
             };
             /* Testing media sender adding before the peer has been initialized */
             if mode == RtcDescriptionType::Offer {
-                let mut stream = locked_client.data.peer.add_media_sender(SdpMediaValue::Video);
+                let mut stream = locked_client.data.peer.create_media_sender(SdpMediaValue::Video);
                 stream.register_property(String::from("msid"), Some(String::from("PreICETest -")));
                 //forget(stream);
             }
@@ -446,7 +446,7 @@ fn handle_command(client: Arc<Mutex<Client<ClientData>>>, command: &WebCommand) 
                 /*
                 let mut video_sender = client.data.video_sender.lock().unwrap();
                 if video_sender.is_none() && peer.media_lines().iter().find(|e| RefCell::borrow(e).media_type != SdpMediaValue::Application).is_some() {
-                    let mut channel = peer.add_media_sender(SdpMediaValue::Video).unwrap();
+                    let mut channel = peer.create_media_sender(SdpMediaValue::Video).unwrap();
                     channel.register_property(String::from("msid"), Some(String::from(format!("{} -", "VideoReplayChannel"))));
                     println!("Props: {:?}", channel.properties().deref());
                 }
@@ -459,8 +459,8 @@ fn handle_command(client: Arc<Mutex<Client<ClientData>>>, command: &WebCommand) 
             if locked_client.data.audio_senders.is_empty() && locked_client.data.video_senders.is_empty() {
                 {
                     let locked_client = locked_client.deref_mut();
-                    //locked_client.data.audio_senders.push_back(Some(locked_client.data.peer.add_media_sender(SdpMediaValue::Audio)));
-                    locked_client.data.video_senders.push_back(Some(locked_client.data.peer.add_media_sender(SdpMediaValue::Video)));
+                    //locked_client.data.audio_senders.push_back(Some(locked_client.data.peer.create_media_sender(SdpMediaValue::Audio)));
+                    locked_client.data.video_senders.push_back(Some(locked_client.data.peer.create_media_sender(SdpMediaValue::Video)));
                 }
 
                 SERVER.lock().unwrap().clients.iter().for_each(|(target_client_id, target)| {
@@ -469,12 +469,12 @@ fn handle_command(client: Arc<Mutex<Client<ClientData>>>, command: &WebCommand) 
                     }
 
                     let mut target = target.lock().unwrap();
-                    target.data.audio_senders.push_back(Some(locked_client.data.peer.add_media_sender(SdpMediaValue::Audio)));
-                    target.data.video_senders.push_back(Some(locked_client.data.peer.add_media_sender(SdpMediaValue::Video)));
+                    target.data.audio_senders.push_back(Some(locked_client.data.peer.create_media_sender(SdpMediaValue::Audio)));
+                    target.data.video_senders.push_back(Some(locked_client.data.peer.create_media_sender(SdpMediaValue::Video)));
                     target.data.enforce_pli = true;
 
-                    locked_client.data.audio_senders.push_back(Some(target.data.peer.add_media_sender(SdpMediaValue::Audio)));
-                    locked_client.data.video_senders.push_back(Some(target.data.peer.add_media_sender(SdpMediaValue::Video)));
+                    locked_client.data.audio_senders.push_back(Some(target.data.peer.create_media_sender(SdpMediaValue::Audio)));
+                    locked_client.data.video_senders.push_back(Some(target.data.peer.create_media_sender(SdpMediaValue::Video)));
                     locked_client.data.enforce_pli = true;
 
                     println!("Connected {} with {}", locked_client.data.client_id, target.data.client_id);

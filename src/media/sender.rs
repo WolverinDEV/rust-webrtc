@@ -16,8 +16,6 @@ use std::future::Future;
 
 #[derive(Debug)]
 pub enum MediaSenderEvent {
-    /// This event will only trigger if the option is enabled within the RTCPeer
-    /// TODO: Add this option!
     UnknownRtcpPacketReceived(Vec<u8>),
 
     ReceiverReportReceived(RtcpReportBlock),
@@ -46,13 +44,15 @@ impl MediaSenderProperties {
         }
     }
 
-    pub fn try_change(&mut self) -> bool {
+    pub fn try_change(&mut self, change_state: bool) -> bool {
         match self.negotiation_state {
             NegotiationState::None |
             NegotiationState::Changed => true,
             NegotiationState::Propagated => false,
             NegotiationState::Negotiated => {
-                self.negotiation_state = NegotiationState::Changed;
+                if change_state {
+                    self.negotiation_state = NegotiationState::Changed;
+                }
                 true
             }
         }
@@ -146,22 +146,22 @@ impl MediaSender {
         if key == "cname" { return; }
 
         let mut properties = self.properties.lock().unwrap();
-        if !properties.try_change() { return; }
+        if !properties.try_change(true) { return; }
 
         properties.properties.insert(key.clone(), value.clone());
+        /* trigger a event, so the peer will look for changes */
         let _ = self.control.send(MediaSenderControl::PropertiesChanged);
     }
 
     pub fn unset_property(&mut self, key: &String) {
         let mut properties = self.properties.lock().unwrap();
-        if !properties.try_change() { return; }
+        if !properties.try_change(false) { return; }
 
         if properties.properties.remove(key).is_some() {
-            if properties.negotiation_state != NegotiationState::None {
-                properties.negotiation_state = NegotiationState::Changed;
-            }
-            let _ = self.control.send(MediaSenderControl::PropertiesChanged);
+            properties.try_change(true);
         }
+        /* trigger a event, so the peer will look for changes */
+        let _ = self.control.send(MediaSenderControl::PropertiesChanged);
     }
 }
 
@@ -290,9 +290,7 @@ impl InternalMediaSender {
             MediaSenderControl::SendRtcpData(data) => {
                 self.rtcp_sender.send_rtcp(data.as_slice());
             },
-            MediaSenderControl::PropertiesChanged => {
-                /* TODO: test nego state */
-            }
+            MediaSenderControl::PropertiesChanged => { /* event already full filled it's purpose */}
         }
     }
 

@@ -39,7 +39,7 @@ pub(crate) struct InternalMediaTrack {
 
 impl InternalMediaTrack {
     pub fn parse_properties_from_sdp(properties: &mut HashMap<String, Option<String>>, id: u32, media: &SdpMedia) {
-        /* TODO: Test if the properties have changed */
+        /* TODO: Test if the properties have changed. Should they even change?? */
         properties.clear();
         for attribute in media.get_attributes_of_type(SdpAttributeType::Ssrc)
             .iter()

@@ -202,7 +202,7 @@ impl MediaLine {
     }
 
     /// Attention: Only use this function if the media type is NOT application!
-    pub(crate) fn generate_local_description(&self) -> Option<SdpMedia> {
+    pub(crate) fn generate_local_description(&self, is_offer: bool) -> Option<SdpMedia> {
         assert_ne!(self.media_type, SdpMediaValue::Application);
         assert_ne!(self.sdp_index, None);
 
@@ -229,7 +229,7 @@ impl MediaLine {
         }
 
         let no_local_streams = self.local_streams.is_empty();
-        let no_remote_streams = self.remote_streams.is_empty(); /* TODO: Test if we're doing an offer or answer (If we're doing an offer, set this to false)! */
+        let no_remote_streams = self.remote_streams.is_empty() && !is_offer;
 
         if no_local_streams && no_remote_streams {
             media.add_attribute(SdpAttribute::Inactive).unwrap();

@@ -25,6 +25,8 @@ use std::ops::{DerefMut};
 use tokio::sync::mpsc;
 use crate::utils::RtpPacketResendRequester;
 use crate::sctp::message::DataChannelType;
+use std::time::SystemTime;
+use tokio::time::Duration;
 
 /// The default setup type if the remote peer offers active and passive setup
 /// Allowed values are only `RTPTransportSetup::Passive` and `RTPTransportSetup::Active`
@@ -91,7 +93,9 @@ pub struct PeerConnection {
      * TODO: Does this really needs to be a unbound server/receiver or could we better use something else?
      * DeVec for example (but what's about memory growth?)
      */
-    local_events: (mpsc::UnboundedSender<PeerConnectionEvent>, mpsc::UnboundedReceiver<PeerConnectionEvent>)
+    local_events: (mpsc::UnboundedSender<PeerConnectionEvent>, mpsc::UnboundedReceiver<PeerConnectionEvent>),
+
+    last_rtp_decode_failed_timestamp: SystemTime
 }
 
 #[derive(Debug)]
@@ -156,7 +160,9 @@ impl PeerConnection {
             application_channel: Box::new(ChannelApplication::new().expect("failed to allocate new application channel")),
 
             media_lines: Vec::new(),
-            local_events: mpsc::unbounded_channel()
+            local_events: mpsc::unbounded_channel(),
+
+            last_rtp_decode_failed_timestamp: SystemTime::UNIX_EPOCH
         };
 
         connection.ice_agent.get_ffi_agent().on_selected_pair(|_, _, _, _| println!("Candidate pair has been found")).unwrap();
@@ -196,11 +202,6 @@ impl PeerConnection {
             if !matches!(&self.signalling_state, &SignallingState::HaveLocalOffer) {
                 return Err(RemoteDescriptionApplyError::InvalidNegotiationState);
             }
-        }
-
-        /* FIXME: Work with the less media lines and trigger renegotiation afterwards! */
-        if self.media_lines.len() > description.media.len() {
-            return Err(RemoteDescriptionApplyError::MissingMediaLines);
         }
 
         /* copy the origin username and send it back, required for mozilla for example */
@@ -377,7 +378,8 @@ impl PeerConnection {
             return Err(CreateAnswerError::InvalidNegotiationState);
         }
 
-        if self.signalling_state != SignallingState::HaveRemoteOffer {
+        let is_offer = self.signalling_state != SignallingState::HaveRemoteOffer;
+        if is_offer {
             /* We're doing an offer. Assigning ID's to all pending media lines */
             let mut current_line_index = self.media_lines.iter()
                 .map(|e| RefCell::borrow(e).sdp_index().map_or(0, |e| e + 1)).max()
@@ -419,7 +421,7 @@ impl PeerConnection {
             let media_line = RefCell::borrow(media_line);
             let mut media = {
                 if media_line.media_type == SdpMediaValue::Application {
-                    let mut media = self.application_channel.generate_local_description()
+                    let mut media = self.application_channel.generate_local_description(is_offer)
                         .map_err(|err| CreateAnswerError::InternalError(err))?;
 
                     if let Some(media_id) = media_line.media_id() {
@@ -516,7 +518,7 @@ impl PeerConnection {
         return line;
     }
 
-    pub fn add_media_sender(&mut self, media_type: SdpMediaValue) -> MediaSender {
+    pub fn create_media_sender(&mut self, media_type: SdpMediaValue) -> MediaSender {
         /* find or create a free media line */
         let media_line = self.allocate_sender_media_line(media_type);
         let mut media_line = RefCell::borrow_mut(&media_line);
@@ -629,8 +631,11 @@ impl PeerConnection {
                 None
             },
             RTCTransportEvent::MessageReceivedDtls(message) => {
-                /* TODO: Test if the ice transport we're receiving it from matches our application channel */
-                self.application_channel.handle_data(message);
+                if self.application_channel.transport_id == ice.transport_id {
+                    self.application_channel.handle_data(message);
+                } else {
+                    /* well that's odd */
+                }
                 None
             },
             RTCTransportEvent::MessageReceivedRtcp(message) => {
@@ -754,8 +759,12 @@ impl PeerConnection {
                         }
                     },
                     Err((error, _)) => {
-                        /* TODO: Don't log spam here */
-                        eprintln!("Failed to decode RTP packet: {:?}", error);
+                        let now = SystemTime::now();
+                        let timeout = Duration::from_secs(1);
+                        if now.duration_since(self.last_rtp_decode_failed_timestamp).unwrap_or_else(timeout) >= timeout {
+                            self.last_rtp_decode_failed_timestamp = now;
+                            eprintln!("Failed to decode RTP packet: {:?}", error);
+                        }
                     }
                 }
                 None
@@ -844,7 +853,7 @@ impl futures::stream::Stream for PeerConnection {
                         return Poll::Ready(Some(event));
                     }
                 } else {
-                    /* TODO: It's not unexpected if receive some kind of error previously. We need some error handing breforhand */
+                    /* TODO: It's not unexpected if receive some kind of error previously. We need some error handing beforehand */
                     panic!("Unexpected ICE exit");
                 }
             }

@@ -12,7 +12,7 @@ use webrtc_sdp::media_type::SdpMedia;
 use std::collections::HashMap;
 use std::collections::hash_map::RandomState;
 
-/* TODO: When looking at extensions https://github.com/zxcpoiu/webrtc/blob/ea3dddf1d0880e89d84a7e502f65c65993d4169d/modules/rtp_rtcp/source/rtp_packet_received.cc#L50 */
+/* Note: When looking at extensions https://github.com/zxcpoiu/webrtc/blob/ea3dddf1d0880e89d84a7e502f65c65993d4169d/modules/rtp_rtcp/source/rtp_packet_received.cc#L50 */
 
 #[derive(Debug)]
 pub enum MediaReceiverEvent {

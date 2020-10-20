@@ -224,7 +224,7 @@ fn spawn_client_peer(client: &mut Client<ClientData>) {
                                     if let DataChannelMessage::String(Some(text)) = message {
                                         if text == "create" {
                                             if let Some(peer) = weak_peer.upgrade() {
-                                                peer.lock().unwrap().add_media_sender(SdpMediaValue::Video);
+                                                peer.lock().unwrap().create_media_sender(SdpMediaValue::Video);
                                             }
                                         } else if text == "rename" {
                                             if let Some(stream) = video_stream.lock().unwrap().as_mut() {
@@ -307,7 +307,7 @@ fn handle_command(client: &mut Client<ClientData>, command: &WebCommand) -> std:
             if mode == RtcDescriptionType::Offer {
                 let mut video_sender = client.data.video_sender.lock().unwrap();
                 if video_sender.is_none() && peer.media_lines().iter().find(|e| RefCell::borrow(e).media_type != SdpMediaValue::Application).is_some() {
-                    let mut channel = peer.add_media_sender(SdpMediaValue::Video);
+                    let mut channel = peer.create_media_sender(SdpMediaValue::Video);
                     channel.register_property(String::from("msid"), Some(String::from(format!("{} -", "VideoReplayChannel"))));
                     println!("Props: {:?}", channel.properties().deref());
                     *video_sender = Some(VideoSender{
