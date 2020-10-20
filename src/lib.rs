@@ -1,6 +1,7 @@
 #![feature(seek_convenience)]
 #![feature(trait_alias)]
 #![feature(btree_drain_filter)]
+#![feature(map_first_last)]
 
 use crate::srtp2::srtp2_global_init;
 

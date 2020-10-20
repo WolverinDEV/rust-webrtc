@@ -237,6 +237,6 @@ impl<ClientData: Default + Unpin> Stream for Client<ClientData> {
 #[serde(tag = "type", content = "payload")]
 pub enum WebCommand {
     RtcSetRemoteDescription { sdp: String, mode: String },
-    RtcAddIceCandidate { media_index: u32, candidate: String },
+    RtcAddIceCandidate { media_index: usize, candidate: String },
     RtcFinishedIceCandidates { }
 }

@@ -37,6 +37,7 @@ pub(crate) enum InternalReceiverControl {
 
 pub struct MediaReceiver {
     pub id: u32,
+    /// Unique media line index
     pub media_line: u32,
 
     pub(crate) events: mpsc::UnboundedReceiver<InternalReceiverEvent>,

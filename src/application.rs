@@ -3,7 +3,7 @@
 use tokio::sync::mpsc;
 use crate::rtc::{ACT_PASS_DEFAULT_SETUP_TYPE};
 use webrtc_sdp::media_type::{SdpMedia, SdpMediaLine, SdpMediaValue, SdpFormatList, SdpProtocolValue};
-use crate::transport::{RTCTransportControl};
+use crate::transport::{RTCTransportControl, RTPTransportSetup};
 use webrtc_sdp::attribute_type::{SdpAttribute, SdpAttributeSetup, SdpAttributeSctpmap, SdpAttributeType};
 use webrtc_sdp::SdpConnection;
 use webrtc_sdp::address::ExplicitlyTypedAddress;
@@ -426,8 +426,8 @@ impl ChannelApplication {
             Some(SdpAttribute::Setup(SdpAttributeSetup::Passive)) => Ok(true),
             Some(SdpAttribute::Setup(SdpAttributeSetup::Actpass)) => {
                 match ACT_PASS_DEFAULT_SETUP_TYPE {
-                    SdpAttributeSetup::Active => Ok(true),
-                    SdpAttributeSetup::Passive => Ok(false),
+                    RTPTransportSetup::Active => Ok(true),
+                    RTPTransportSetup::Passive => Ok(false),
                     _ => panic!("this branch should never be reached")
                 }
             },

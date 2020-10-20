@@ -11,7 +11,7 @@ use openssl::bn::BigNum;
 use openssl::error::ErrorStack;
 use openssl::asn1::{Asn1Time};
 use openssl::hash::MessageDigest;
-use webrtc_sdp::attribute_type::{SdpAttributeFingerprintHashType, SdpAttributeFingerprint, SdpAttributeSetup};
+use webrtc_sdp::attribute_type::{SdpAttributeFingerprintHashType, SdpAttributeFingerprint, SdpAttributeSetup, SdpAttribute, SdpAttributeType};
 use std::ffi::CString;
 use webrtc_sdp::address::Address;
 use openssl::ssl::{SslMethod};
@@ -30,6 +30,10 @@ pub mod packet_history;
 mod sender;
 pub use sender::*;
 use std::sync::{Arc, Mutex};
+use webrtc_sdp::media_type::SdpMedia;
+use webrtc_sdp::error::SdpParserInternalError;
+use crate::rtc::ACT_PASS_DEFAULT_SETUP_TYPE;
+use glib::BoolError;
 
 #[derive(Clone)]
 pub struct DebugableCandidate {
@@ -101,6 +105,7 @@ pub enum RTCTransportControl {
 
 #[derive(Debug)]
 pub enum RTCTransportInitializeError {
+    IceStreamAllocationFailed { error: BoolError },
     PrivateKeyGenFailed{ stack: ErrorStack },
     CertificateGenFailed{ stack: ErrorStack },
     FingerprintGenFailed{ stack: ErrorStack },
@@ -110,9 +115,32 @@ pub enum RTCTransportInitializeError {
 #[derive(Debug)]
 pub enum RTCTransportICECandidateAddError {
     UnknownMediaChannel,
+    /* This should never happen */
+    MissingTransport,
     RemoteCandidatesAlreadyReceived,
     FqdnNotYetSupported,
-    InvalidComponentIndex
+    InvalidComponentIndex,
+    RemoteStateMissing,
+}
+
+#[derive(Debug)]
+pub enum RTCTransportDescriptionApplyError {
+    /// Applied media line isn't the owning media line,
+    /// and the owning media line hasn't yet applied any description
+    MissingInitialDescription,
+
+    MissingUsernameFragment,
+    MissingPassword,
+    MissingFingerprint,
+    MissingSetup,
+
+    InvalidSetupValue,
+    /// We've locally a contradicting setup value for the remote peer.
+    ContradictingSetupValue,
+    /// The setup value does not matches the previous value
+    MissMatchingSetupValue,
+
+    CandidateAddError(RTCTransportICECandidateAddError)
 }
 
 enum DTLSState {
@@ -122,29 +150,43 @@ enum DTLSState {
     Failed()
 }
 
+struct PeerState {
+    credentials: ICECredentials,
+    fingerprint: SdpAttributeFingerprint,
+    candidates_gathered: bool,
+}
+
+#[derive(Debug, Eq, PartialEq, Copy, Clone)]
+pub enum RTPTransportSetup {
+    /// The setup state has not yet been decided
+    Unset,
+
+    Active,
+    Passive,
+
+    Actpass,
+    Holdconn,
+}
+
 pub struct RTCTransport {
     /// A unique id identifying this transport
     pub transport_id: u32,
 
-    /// Index of the "owning" media line
+    /// Index of the "owning" media line (unique id)
     pub owning_media_line: u32,
-    /// Containing all media lines which actively listening to the channel events (bundled channels)
+    /// Containing all media lines (unique ids)
     pub media_lines: Vec<u32>,
 
     state: RTCTransportState,
     pending_events: VecDeque<RTCTransportEvent>,
 
-    pub local_credentials: ICECredentials,
-    pub remote_credentials: ICECredentials,
+    local_state: PeerState,
+    remote_state: Option<PeerState>,
 
     //certificate: x509::X509,
     //private_key: pkey::PKey<pkey::Private>,
-    pub fingerprint: SdpAttributeFingerprint,
 
-    pub setup: SdpAttributeSetup,
-
-    local_candidates_gathered: bool,
-    remote_candidates_gathered: bool,
+    setup: RTPTransportSetup,
 
     control_receiver: mpsc::UnboundedReceiver<RTCTransportControl>,
     pub control_sender: mpsc::UnboundedSender<RTCTransportControl>,
@@ -154,6 +196,7 @@ pub struct RTCTransport {
 
     last_ice_state: ComponentState,
     ice_stream: Option<libnice::ice::Stream>,
+    local_candidates: Vec<Box<Candidate>>,
 
     /// State containing the current dtls state
     dtls: Option<DTLSState>,
@@ -241,15 +284,11 @@ impl RTCTransport {
     }
 
     pub fn new(mut stream: libnice::ice::Stream,
-               remote_credentials: ICECredentials,
-               media_line: u32,
-               setup: SdpAttributeSetup
-    ) -> Result<RTCTransport, RTCTransportInitializeError> {
+               media_line: u32) -> Result<RTCTransport, RTCTransportInitializeError> {
         assert_eq!(stream.components().len(), 1, "expected only one stream component");
 
 
         let (fingerprint, ssl) = RTCTransport::generate_ssl_components()?;
-        stream.set_remote_credentials(CString::new(remote_credentials.username.clone()).unwrap(), CString::new(remote_credentials.password.clone()).unwrap());
 
         let dtls_stream = DtlsStreamSource{
             verbose: false ,
@@ -269,22 +308,22 @@ impl RTCTransport {
             state: RTCTransportState::Disconnected,
             pending_events: VecDeque::new(),
 
-            remote_credentials,
-            local_credentials: ICECredentials{
-                username: String::from(stream.get_local_ufrag()),
-                password: String::from(stream.get_local_pwd())
+            local_state: PeerState{
+                credentials: ICECredentials{
+                    username: String::from(stream.get_local_ufrag()),
+                    password: String::from(stream.get_local_pwd())
+                },
+                candidates_gathered: false,
+                fingerprint
             },
+            remote_state: None,
 
             //certificate,
             //private_key,
-            fingerprint,
 
-            setup,
-
-            local_candidates_gathered: false,
-            remote_candidates_gathered: false,
-
+            setup: RTPTransportSetup::Unset,
             last_ice_state: ComponentState::Disconnected,
+            local_candidates: Vec::with_capacity(16),
 
             control_receiver: crx,
             control_sender: ctx,
@@ -304,39 +343,173 @@ impl RTCTransport {
         Ok(connection)
     }
 
+    pub fn remote_credentials(&self) -> Option<&ICECredentials> {
+        self.remote_state.as_ref().map(|e| &e.credentials)
+    }
+
+    pub fn generate_local_description(&self, media: &mut SdpMedia) -> Result<(), SdpParserInternalError> {
+        media.add_attribute(SdpAttribute::IceUfrag(self.local_state.credentials.username.clone()))?;
+        media.add_attribute(SdpAttribute::IcePwd(self.local_state.credentials.password.clone()))?;
+        media.add_attribute(SdpAttribute::IceOptions(vec![String::from("trickle")]))?;
+        media.add_attribute(SdpAttribute::Fingerprint(self.local_state.fingerprint.clone()))?;
+        match &self.setup {
+            RTPTransportSetup::Unset |
+            RTPTransportSetup::Actpass => media.add_attribute(SdpAttribute::Setup(SdpAttributeSetup::Actpass))?,
+            RTPTransportSetup::Active =>    media.add_attribute(SdpAttribute::Setup(SdpAttributeSetup::Active))?,
+            RTPTransportSetup::Passive =>    media.add_attribute(SdpAttribute::Setup(SdpAttributeSetup::Passive))?,
+            RTPTransportSetup::Holdconn =>    media.add_attribute(SdpAttribute::Setup(SdpAttributeSetup::Holdconn))?,
+        }
+        for candidate in self.local_candidates.iter() {
+            media.add_attribute(SdpAttribute::Candidate(candidate.deref().clone()));
+        }
+        Ok(())
+    }
+
+    pub fn apply_remote_description(&mut self, media_line: u32, media: &SdpMedia) -> Result<(), RTCTransportDescriptionApplyError> {
+        let username = if let Some(SdpAttribute::IceUfrag(username)) = media.get_attribute(SdpAttributeType::IceUfrag) {
+            username
+        } else {
+            return Err(RTCTransportDescriptionApplyError::MissingUsernameFragment);
+        };
+
+        let password = if let Some(SdpAttribute::IcePwd(password)) = media.get_attribute(SdpAttributeType::IcePwd) {
+            password
+        } else {
+            return Err(RTCTransportDescriptionApplyError::MissingPassword);
+        };
+
+        let fingerprint = if let Some(SdpAttribute::Fingerprint(fingerprint)) = media.get_attribute(SdpAttributeType::Fingerprint) {
+            fingerprint
+        } else {
+            return Err(RTCTransportDescriptionApplyError::MissingFingerprint);
+        };
+
+        let setup = if let Some(SdpAttribute::Setup(setup)) = media.get_attribute(SdpAttributeType::Setup) {
+            setup
+        } else {
+            return Err(RTCTransportDescriptionApplyError::MissingSetup);
+        };
+
+        if self.remote_state.is_none() {
+            self.remote_state = Some(PeerState {
+                credentials: ICECredentials{ username: username.clone(), password: password.clone() },
+                fingerprint: fingerprint.clone(),
+                candidates_gathered: false
+            });
+
+            match &self.setup {
+                RTPTransportSetup::Unset |
+                RTPTransportSetup::Actpass => {
+                    self.setup = match setup {
+                        SdpAttributeSetup::Passive => RTPTransportSetup::Active,
+                        SdpAttributeSetup::Active => RTPTransportSetup::Passive,
+                        SdpAttributeSetup::Actpass => {
+                            if self.setup == RTPTransportSetup::Actpass {
+                                return Err(RTCTransportDescriptionApplyError::InvalidSetupValue);
+                            } else {
+                                ACT_PASS_DEFAULT_SETUP_TYPE
+                            }
+                        },
+                        SdpAttributeSetup::Holdconn => RTPTransportSetup::Holdconn
+                    };
+                },
+                RTPTransportSetup::Holdconn => {
+                    self.setup = RTPTransportSetup::Holdconn;
+                },
+                RTPTransportSetup::Active => {
+                    if !matches!(setup, SdpAttributeSetup::Passive) {
+                        return Err(RTCTransportDescriptionApplyError::ContradictingSetupValue);
+                    }
+                },
+                RTPTransportSetup::Passive => {
+                    if !matches!(setup, SdpAttributeSetup::Active) {
+                        return Err(RTCTransportDescriptionApplyError::ContradictingSetupValue);
+                    }
+                }
+            }
+            debug_assert!(matches!(self.setup, RTPTransportSetup::Active | RTPTransportSetup::Passive | RTPTransportSetup::Holdconn));
+
+            if let Some(stream) = &mut self.ice_stream {
+                let mut remote_state = self.remote_state.as_ref().unwrap();
+                stream.set_remote_credentials(CString::new(remote_state.credentials.username.clone()).unwrap(), CString::new(remote_state.credentials.password.clone()).unwrap())
+            }
+
+            for candidate in media.get_attributes_of_type(SdpAttributeType::Candidate)
+                .iter()
+                .map(|attribute| if let SdpAttribute::Candidate(c) = attribute { c } else { panic!("expected a candidate") }) {
+
+                /* TODO: Really an error or better be an event? */
+                self.add_remote_candidate(Some(candidate))
+                    .map_err(|err| RTCTransportDescriptionApplyError::CandidateAddError(err))?;
+            }
+
+            if media.get_attribute(SdpAttributeType::EndOfCandidates).is_some() {
+                let mut remote_state = self.remote_state.as_mut().unwrap();
+                remote_state.candidates_gathered = true;
+            }
+
+            /*
+            /* Firefox does not sends this stuff */
+            let is_trickle = media.get_attribute(SdpAttributeType::IceOptions)
+                .map(|attribute| if let SdpAttribute::IceOptions(opts) = attribute { opts } else { panic!("expected a ice options") })
+                .map_or(false, |attributes| attributes.iter().find(|attribute| attribute.as_str() == "trickle").is_some());
+            if media.get_attribute(SdpAttributeType::EndOfCandidates).is_some() {
+                if is_trickle {
+                    return Err(RemoteDescriptionApplyError::InvalidSdp { reason: String::from("found end-of-candidates but the ice mode is expected to be trickle") });
+                }
+            } else {
+                if !is_trickle {
+                    return Err(RemoteDescriptionApplyError::InvalidSdp { reason: String::from("missing end-of-candidates but the ice mode is trickle") });
+                }
+            }
+            */
+        } else {
+            let remote_state = self.remote_state.as_ref().unwrap();
+            /* we're already connected, check if we're matching */
+            /* TODO: Check if attributes match! */
+            /* TODO: Check candidates? */
+        }
+
+        Ok(())
+    }
+
     pub fn state(&self) -> &RTCTransportState {
         &self.state
     }
 
     pub fn add_remote_candidate(&mut self, candidate: Option<&Candidate>) -> Result<(), RTCTransportICECandidateAddError> {
         if let RTCTransportState::Failed(..) = &self.state {
-            /* TODO: Should we really return okey here? */
+            /* TODO: Should we really return ok here? */
             return Ok(());
         }
 
-        if self.remote_candidates_gathered {
-            Err(RTCTransportICECandidateAddError::RemoteCandidatesAlreadyReceived)
-        } else if let Some(candidate) = candidate {
-            let candidate = candidate.clone();
-            if let Address::Fqdn(_address) = &candidate.address {
-                Err(RTCTransportICECandidateAddError::FqdnNotYetSupported)
-                /*
-                if address.ends_with(".local") {
-                    candidate.address = Address::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST));
-                }
-                */
-            } else {
-                let ice_stream = self.ice_stream.as_mut().expect("missing ice stream");
-                if candidate.component as usize > ice_stream.components().len() {
-                    Err(RTCTransportICECandidateAddError::InvalidComponentIndex)
+        if let Some(state) = self.remote_state.as_mut() {
+            if state.candidates_gathered {
+                Err(RTCTransportICECandidateAddError::RemoteCandidatesAlreadyReceived)
+            } else if let Some(candidate) = candidate {
+                let candidate = candidate.clone();
+                if let Address::Fqdn(_address) = &candidate.address {
+                    Err(RTCTransportICECandidateAddError::FqdnNotYetSupported)
+                    /*
+                    if address.ends_with(".local") {
+                        candidate.address = Address::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST));
+                    }
+                    */
                 } else {
-                    ice_stream.add_remote_candidate(candidate);
-                    Ok(())
+                    let ice_stream = self.ice_stream.as_mut().expect("missing ice stream");
+                    if candidate.component as usize > ice_stream.components().len() {
+                        Err(RTCTransportICECandidateAddError::InvalidComponentIndex)
+                    } else {
+                        ice_stream.add_remote_candidate(candidate);
+                        Ok(())
+                    }
                 }
+            } else {
+                state.candidates_gathered = true;
+                Ok(())
             }
         } else {
-            self.remote_candidates_gathered = true;
-            Ok(())
+            Err(RTCTransportICECandidateAddError::RemoteStateMissing)
         }
     }
 
@@ -504,12 +677,13 @@ impl Stream for RTCTransport {
             return Poll::Pending;
         }
 
-        if !self.local_candidates_gathered {
+        if !self.local_state.candidates_gathered {
             if let Poll::Ready(candidate) = self.ice_stream.as_mut().expect("missing ice stream").poll_next_unpin(cx) {
                 return if let Some(ice_candidate) = candidate {
+                    self.local_candidates.push(Box::new(ice_candidate.clone()));
                     Poll::Ready(Some(RTCTransportEvent::LocalIceCandidate(DebugableCandidate{ inner: ice_candidate })))
                 } else {
-                    self.local_candidates_gathered = true;
+                    self.local_state.candidates_gathered = true;
                     Poll::Ready(Some(RTCTransportEvent::LocalIceGatheringFinished()))
                 }
             }
@@ -556,11 +730,11 @@ impl Stream for RTCTransport {
                         let mut stream_builder = ssl::SslStreamBuilder::new(ssl, DtlsStream{ source: self.dtls_buffer.clone() });
 
                         let result = match self.setup {
-                            SdpAttributeSetup::Active => {
+                            RTPTransportSetup::Active => {
                                 stream_builder.set_connect_state();
                                 stream_builder.connect()
                             },
-                            SdpAttributeSetup::Passive => {
+                            RTPTransportSetup::Passive => {
                                 stream_builder.set_accept_state();
                                 stream_builder.accept()
                             },

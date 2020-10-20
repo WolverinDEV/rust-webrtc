@@ -28,6 +28,7 @@ use std::collections::{LinkedList, HashMap};
 use lazy_static::lazy_static;
 use std::rc::Rc;
 use std::borrow::BorrowMut;
+use std::mem::forget;
 
 mod shared;
 mod video;
@@ -324,7 +325,7 @@ fn execute_client_peer(client: Arc<Mutex<Client<ClientData>>>, locked_client: &m
                     let mut locked_client = client.lock().unwrap();
                     let peer = &mut locked_client.data.peer;
                     let media_line = peer.media_lines().iter()
-                        .find(|line| RefCell::borrow(line).index == receiver.media_line)
+                        .find(|line| RefCell::borrow(line).unique_id() == receiver.media_line)
                         .map(|e| e.clone()).unwrap();
                     let media_line = RefCell::borrow(&media_line);
 
@@ -431,6 +432,14 @@ fn handle_command(client: Arc<Mutex<Client<ClientData>>>, command: &WebCommand) 
                     RtcDescriptionType::Answer
                 }
             };
+            /*
+            /* Testing media sender adding before the peer has been initialized */
+            if mode == RtcDescriptionType::Offer {
+                let mut stream = locked_client.data.peer.add_media_sender(SdpMediaValue::Video);
+                stream.register_property(String::from("msid"), Some(String::from("PreICETest -")));
+                forget(stream);
+            }
+            */
 
             locked_client.data.peer.set_remote_description(&sdp, &mode).map_err(|err| format!("{:?}", err))?;
 
@@ -486,7 +495,12 @@ fn handle_command(client: Arc<Mutex<Client<ClientData>>>, command: &WebCommand) 
 
         },
         WebCommand::RtcFinishedIceCandidates {} => {
-            for line in locked_client.data.peer.media_lines().iter().map(|e| RefCell::borrow_mut(e).index).collect::<Vec<u32>>() {
+            let sdp_lines = locked_client.data.peer.media_lines().iter()
+                .map(|e| RefCell::borrow(e).sdp_index().clone())
+                .filter_map(|e| e)
+                .collect::<Vec<_>>();
+
+            for line in sdp_lines {
                 if let Err(err) = locked_client.data.peer.add_remote_ice_candidate(line, None) {
                     eprintln!("Failed to signal ICE finished: {:?}", err);
                 }

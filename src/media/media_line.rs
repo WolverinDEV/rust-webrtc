@@ -4,10 +4,13 @@ use webrtc_sdp::attribute_type::{SdpAttributeExtmap, SdpAttribute, SdpAttributeT
 use webrtc_sdp::SdpConnection;
 use webrtc_sdp::address::ExplicitlyTypedAddress;
 use std::net::{IpAddr, Ipv4Addr};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 pub struct MediaLine {
-    pub id: String,
-    pub index: u32,
+    unique_id: u32,
+    /* Only set after a initial SDP exchange. May be empty. */
+    media_id: Option<String>,
+    sdp_index: Option<usize>,
 
     pub media_type: SdpMediaValue,
 
@@ -33,11 +36,13 @@ pub enum MediaLineParseError {
     InvalidSendRecvStatus
 }
 
+static UNIQUE_ID_INDEX: AtomicU32 = AtomicU32::new(0);
 impl MediaLine {
-    pub(crate) fn new(index: u32, id: String, media_type: SdpMediaValue) -> Self {
+    pub(crate) fn new(media_type: SdpMediaValue) -> Self {
         MediaLine{
-            id,
-            index,
+            unique_id: UNIQUE_ID_INDEX.fetch_add(1, Ordering::Relaxed),
+            media_id: None,
+            sdp_index: None,
 
             media_type,
 
@@ -53,6 +58,30 @@ impl MediaLine {
             remote_extensions: Vec::new(),
             local_extensions: Vec::new(),
         }
+    }
+
+    /// Returns the unique media line index.
+    /// This index MUST be unique within a RTPConnection and
+    /// MAY be unique globally.
+    pub fn unique_id(&self) -> u32 {
+        self.unique_id
+    }
+
+    /// Returns the media id which will be used to group
+    /// media streams together.
+    pub fn media_id(&self) -> &Option<String> {
+        &self.media_id
+    }
+
+    /// Returns, if known, the sdp index of the media line.
+    pub fn sdp_index(&self) -> &Option<usize> {
+        &self.sdp_index
+    }
+
+    pub(crate) fn set_sdp_index(&mut self, index: usize, mid: String) {
+        debug_assert!(self.sdp_index.is_none());
+        self.sdp_index = Some(index);
+        self.media_id = Some(mid);
     }
 
     pub fn negotiation_state(&self) -> &NegotiationState {
@@ -113,13 +142,14 @@ impl MediaLine {
         Ok(())
     }
 
-    pub(crate) fn new_from_sdp(index: u32, media: &SdpMedia) -> Result<Self, MediaLineParseError> {
+    pub(crate) fn new_from_sdp(media_line_index: usize, media: &SdpMedia) -> Result<Self, MediaLineParseError> {
         let id = if let Some(SdpAttribute::Mid(id)) = media.get_attribute(SdpAttributeType::Mid) { Some(id.clone()) } else { None };
         if id.is_none() {
             return Err(MediaLineParseError::MissingMediaId);
         }
 
-        let mut result = MediaLine::new(index, id.unwrap(), media.get_type().clone());
+        let mut result = MediaLine::new(media.get_type().clone());
+        result.set_sdp_index(media_line_index, id.unwrap());
         if *media.get_type() == SdpMediaValue::Application {
             if media.get_attribute(SdpAttributeType::Recvonly).is_some() ||
                 media.get_attribute(SdpAttributeType::Sendonly).is_some() {
@@ -174,6 +204,7 @@ impl MediaLine {
     /// Attention: Only use this function if the media type is NOT application!
     pub(crate) fn generate_local_description(&self) -> Option<SdpMedia> {
         assert_ne!(self.media_type, SdpMediaValue::Application);
+        assert_ne!(self.sdp_index, None);
 
         if self.local_codecs.is_empty() {
             return None;
@@ -193,7 +224,9 @@ impl MediaLine {
             amount: None
         }).unwrap();
         media.add_attribute(SdpAttribute::RtcpMux).unwrap();
-        media.add_attribute(SdpAttribute::Mid(self.id.clone())).unwrap();
+        if let Some(media_id) = &self.media_id {
+            media.add_attribute(SdpAttribute::Mid(media_id.clone())).unwrap();
+        }
 
         let no_local_streams = self.local_streams.is_empty();
         let no_remote_streams = self.remote_streams.is_empty(); /* TODO: Test if we're doing an offer or answer (If we're doing an offer, set this to false)! */

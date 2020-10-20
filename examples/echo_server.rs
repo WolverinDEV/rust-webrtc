@@ -334,7 +334,12 @@ fn handle_command(client: &mut Client<ClientData>, command: &WebCommand) -> std:
             let mut peer = client.data.peer.as_ref().ok_or(String::from("no peer initialized"))?
                 .lock().unwrap();
 
-            for line in peer.media_lines().iter().map(|e| RefCell::borrow_mut(e).index).collect::<Vec<u32>>() {
+            let sdp_lines = peer.media_lines().iter()
+                .map(|e| RefCell::borrow(e).sdp_index().clone())
+                .filter_map(|e| e)
+                .collect::<Vec<_>>();
+
+            for line in sdp_lines {
                 if let Err(err) = peer.add_remote_ice_candidate(line, None) {
                     eprintln!("Failed to signal ICE finished: {:?}", err);
                 }
