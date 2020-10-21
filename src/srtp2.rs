@@ -2,7 +2,7 @@
 
 use libsrtp2_sys as ffi;
 use core::{mem};
-use std::os::raw::{c_void, c_int};
+use std::os::raw::{c_void, c_int, c_ulong};
 use openssl::srtp::SrtpProfileId;
 use openssl::error::ErrorStack;
 
@@ -13,12 +13,12 @@ const SRTP_MASTER_SALT_LENGTH: usize = 14;
 const SRTP_MASTER_LENGTH: usize = SRTP_MASTER_KEY_LENGTH + SRTP_MASTER_SALT_LENGTH;
 
 /* AES-GCM stuff (http://tools.ietf.org/html/rfc7714) */
-const SRTP_AEAD_AES_128_GCM: u32 = 0x0007;
+const SRTP_AEAD_AES_128_GCM: c_ulong = 0x0007;
 const SRTP_AESGCM128_MASTER_KEY_LENGTH: usize = 16;
 const SRTP_AESGCM128_MASTER_SALT_LENGTH: usize = 12;
 const SRTP_AESGCM128_MASTER_LENGTH: usize = SRTP_AESGCM128_MASTER_KEY_LENGTH + SRTP_AESGCM128_MASTER_SALT_LENGTH;
 
-const SRTP_AEAD_AES_256_GCM: u32 = 0x0008;
+const SRTP_AEAD_AES_256_GCM: c_ulong = 0x0008;
 const SRTP_AESGCM256_MASTER_KEY_LENGTH: usize = 32;
 const SRTP_AESGCM256_MASTER_SALT_LENGTH: usize = 12;
 const SRTP_AESGCM256_MASTER_LENGTH: usize = SRTP_AESGCM256_MASTER_KEY_LENGTH + SRTP_AESGCM256_MASTER_SALT_LENGTH;

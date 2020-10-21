@@ -421,7 +421,7 @@ impl PeerConnection {
             let media_line = RefCell::borrow(media_line);
             let mut media = {
                 if media_line.media_type == SdpMediaValue::Application {
-                    let mut media = self.application_channel.generate_local_description(is_offer)
+                    let mut media = self.application_channel.generate_local_description()
                         .map_err(|err| CreateAnswerError::InternalError(err))?;
 
                     if let Some(media_id) = media_line.media_id() {
@@ -432,7 +432,7 @@ impl PeerConnection {
                         .unwrap();
                     media
                 } else {
-                    let mut media = media_line.generate_local_description()
+                    let mut media = media_line.generate_local_description(is_offer)
                         .ok_or(CreateAnswerError::DescribeError(*sdp_index))?;
 
                     for sender in self.stream_sender.values()
@@ -736,6 +736,7 @@ impl PeerConnection {
                                         RefCell::borrow_mut(sender.1).handle_unknown_rtcp(&data)
                                     );
                                 }
+                                _ => {}
                             }
                         },
                         Err(error) => {
@@ -761,7 +762,7 @@ impl PeerConnection {
                     Err((error, _)) => {
                         let now = SystemTime::now();
                         let timeout = Duration::from_secs(1);
-                        if now.duration_since(self.last_rtp_decode_failed_timestamp).unwrap_or_else(timeout) >= timeout {
+                        if now.duration_since(self.last_rtp_decode_failed_timestamp).unwrap_or(timeout) >= timeout {
                             self.last_rtp_decode_failed_timestamp = now;
                             eprintln!("Failed to decode RTP packet: {:?}", error);
                         }
