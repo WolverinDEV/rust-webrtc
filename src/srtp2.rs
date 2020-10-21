@@ -242,6 +242,7 @@ impl Srtp2 {
 
                     Ok((SRTP_MASTER_KEY_LENGTH, SRTP_MASTER_SALT_LENGTH, SRTP_MASTER_LENGTH))
                 },
+                #[cfg(target_os = "windows")]
                 (_, SRTP_AEAD_AES_128_GCM) => {
                     unsafe {
                         ffi::srtp_crypto_policy_set_aes_gcm_128_16_auth(&mut local_policy.rtp);
@@ -253,6 +254,7 @@ impl Srtp2 {
 
                     Ok((SRTP_AESGCM128_MASTER_KEY_LENGTH, SRTP_AESGCM128_MASTER_SALT_LENGTH, SRTP_AESGCM128_MASTER_LENGTH))
                 },
+                #[cfg(target_os = "windows")]
                 (_, SRTP_AEAD_AES_256_GCM) => {
                     unsafe {
                         ffi::srtp_crypto_policy_set_aes_gcm_256_16_auth(&mut local_policy.rtp);
