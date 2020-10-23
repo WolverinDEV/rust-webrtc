@@ -1,5 +1,5 @@
 [package]
-name = "web-test"
+name = "webrtc-lib"
 version = "0.1.0"
 authors = ["WolverinDEV <git@teaspeak.de>"]
 edition = "2018"
