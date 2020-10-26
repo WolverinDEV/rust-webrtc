@@ -132,7 +132,7 @@ impl MediaSender {
 
         let mut buffer = unsafe { std::mem::MaybeUninit::<[u8; 2048]>::uninit().assume_init() };
         let size = packet.build_into_unchecked(&mut buffer);
-        let _ = self.control.send(MediaSenderControl::SendRtpData(sequence_no, buffer[0..size].to_vec()));
+        let _ = self.control.send(MediaSenderControl::SendRtpData(seq_no, buffer[0..size].to_vec()));
     }
 
     pub fn send_control(&mut self, packet: RtcpPacket) -> Result<(), ControlDataSendError> {

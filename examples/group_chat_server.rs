@@ -231,6 +231,9 @@ fn broadcast_client_media(client: Arc<Mutex<Client<ClientData>>>, locked_client:
                     },
                     MediaReceiverEvent::RtcpPacketReceived(packet) => {
                         println!("Received RTCP packet for audio stream: {:?}", packet);
+                    },
+                    MediaReceiverEvent::ByeSignalReceived(reason) => {
+                        println!("Received bye signal for audio stream with reason {:?}", reason);
                     }
                 }
             }
@@ -268,6 +271,9 @@ fn broadcast_client_media(client: Arc<Mutex<Client<ClientData>>>, locked_client:
                     },
                     MediaReceiverEvent::RtcpPacketReceived(packet) => {
                         println!("Received RTCP packet for video stream: {:?}", packet);
+                    },
+                    MediaReceiverEvent::ByeSignalReceived(reason) => {
+                        println!("Received bye signal for video stream with reason {:?}", reason);
                     }
                 }
             }

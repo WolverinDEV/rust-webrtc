@@ -20,9 +20,9 @@ use crate::shared::gio::MAIN_GIO_EVENT_LOOP;
 use crate::shared::ws::{WebCommand, Client, ClientEvents};
 use webrtc_sdp::media_type::SdpMediaValue;
 use std::cell::RefCell;
-use web_test::application::{DataChannelEvent, DataChannelMessage};
-use web_test::utils::rtcp::RtcpPacket;
-use web_test::utils::rtcp::packets::{RtcpPacketPayloadFeedback, RtcpPayloadFeedback};
+use webrtc_lib::application::{DataChannelEvent, DataChannelMessage};
+use webrtc_lib::utils::rtcp::RtcpPacket;
+use webrtc_lib::utils::rtcp::packets::{RtcpPacketPayloadFeedback, RtcpPayloadFeedback};
 use futures::future::{Abortable, AbortHandle};
 use crate::shared::execute_example;
 
