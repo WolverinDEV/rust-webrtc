@@ -6,6 +6,7 @@ use futures::{StreamExt};
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 
+extern crate webrtc_lib;
 use webrtc_sdp::parse_sdp;
 use webrtc_sdp::attribute_type::{SdpAttribute};
 use std::sync::{Arc, Mutex};
@@ -13,15 +14,10 @@ use std::ops::{DerefMut};
 use std::str::FromStr;
 use futures::task::{Poll, Waker};
 use tokio::sync::mpsc;
-use web_test::{rtc, initialize_webrtc};
-use web_test::rtc::{PeerConnection, PeerConnectionEvent, RtcDescriptionType};
-use web_test::media::{MediaSender, MediaReceiverEvent, Codec, MediaSenderEvent, MediaReceiver};
 use crate::shared::gio::MAIN_GIO_EVENT_LOOP;
 use crate::shared::ws::{WebCommand, Client, ClientEvents};
 use webrtc_sdp::media_type::SdpMediaValue;
 use std::cell::RefCell;
-use web_test::utils::rtcp::RtcpPacket;
-use web_test::utils::rtcp::packets::{RtcpPacketPayloadFeedback, RtcpPayloadFeedback};
 use futures::future::{Abortable, AbortHandle};
 use crate::shared::execute_example;
 use std::collections::{LinkedList, HashMap};
@@ -30,6 +26,11 @@ use std::rc::Rc;
 use std::borrow::BorrowMut;
 #[allow(unused_imports)]
 use std::mem::forget;
+use webrtc_lib::media::{Codec, MediaReceiver, MediaSender, MediaSenderEvent, MediaReceiverEvent};
+use webrtc_lib::rtc::{PeerConnection, PeerConnectionEvent, RtcDescriptionType};
+use webrtc_lib::utils::rtcp::packets::{RtcpPayloadFeedback, RtcpPacketPayloadFeedback};
+use webrtc_lib::utils::rtcp::RtcpPacket;
+use webrtc_lib::{initialize_webrtc, rtc};
 
 mod shared;
 mod video;
@@ -434,7 +435,8 @@ fn handle_command(client: Arc<Mutex<Client<ClientData>>>, command: &WebCommand) 
                 }
             };
             /* Testing media sender adding before the peer has been initialized */
-            if mode == RtcDescriptionType::Offer {
+            if mode == RtcDescriptionType::Offer && false {
+                /* FIXME: Ice owner must fix! */
                 let mut stream = locked_client.data.peer.create_media_sender(SdpMediaValue::Video);
                 stream.register_property(String::from("msid"), Some(String::from("PreICETest -")));
                 //forget(stream);
@@ -460,7 +462,7 @@ fn handle_command(client: Arc<Mutex<Client<ClientData>>>, command: &WebCommand) 
                 {
                     let locked_client = locked_client.deref_mut();
                     //locked_client.data.audio_senders.push_back(Some(locked_client.data.peer.create_media_sender(SdpMediaValue::Audio)));
-                    locked_client.data.video_senders.push_back(Some(locked_client.data.peer.create_media_sender(SdpMediaValue::Video)));
+                    //locked_client.data.video_senders.push_back(Some(locked_client.data.peer.create_media_sender(SdpMediaValue::Video)));
                 }
 
                 SERVER.lock().unwrap().clients.iter().for_each(|(target_client_id, target)| {

@@ -603,7 +603,7 @@ impl PeerConnection {
         match event {
             RTCTransportEvent::LocalIceCandidate(candidate) => {
                 let media_line = self.media_line_by_unique_id(ice.owning_media_line);
-                if let Some(Some(index)) = media_line.map(|e| RefCell::borrow(&e).sdp_index().clone()) {
+                if let Some(Some(index)) = media_line.as_ref().map(|e| RefCell::borrow(e).sdp_index().clone()) {
                     return Some(PeerConnectionEvent::LocalIceCandidate(Some(candidate.into()), index));
                 } else {
                     /* We received an ICE candidate for an not yet registered media line */
@@ -697,8 +697,11 @@ impl PeerConnection {
                                     }
                                 },
                                 RtcpPacket::Bye(bye) => {
-                                    eprintln!("Received bye packet: {:?}", bye);
-                                    /* TODO: Remove remote stream(s) without nego */
+                                    for ssrc in bye.src.iter() {
+                                        if let Some(receiver) = self.stream_receiver.get_mut(ssrc) {
+                                            receiver.handle_bye(&bye.reason);
+                                        }
+                                    }
                                 },
                                 RtcpPacket::TransportFeedback(fb) => {
                                     if let Some(sender) = self.stream_sender.get(&fb.media_ssrc) {
@@ -803,17 +806,20 @@ impl PeerConnection {
             if let Some(media_line) = media_line {
                 let mut media_line = RefCell::borrow_mut(&media_line);
                 media_line.local_streams.retain(|e| *e != sender.track.id);
-                if media_line.local_streams.is_empty() && media_line.remote_streams.is_empty() && media_line.sdp_index().is_none() {
-                    /* safely remove that line */
-                    if let Some(index) = self.media_lines.iter().position(|e| RefCell::borrow(e).unique_id() == media_line.unique_id()) {
-                        /* fully remove that media line, no need to keep it */
-                        self.media_lines.remove(index);
-                    }
-                }
 
                 /* Change the state, even if the media line has been removed. Should have no impact. */
                 if media_line.negotiation_state != NegotiationState::None {
                     media_line.negotiation_state = NegotiationState::Changed;
+                }
+
+                if media_line.local_streams.is_empty() && media_line.remote_streams.is_empty() && media_line.sdp_index().is_none() {
+                    /* safely remove that line */
+                    let unique_id = media_line.unique_id();
+                    drop(media_line); /* drop our mutable reference so we can borrow it imutable */
+                    if let Some(index) = self.media_lines.iter().position(|e| RefCell::borrow(e).unique_id() == unique_id) {
+                        /* fully remove that media line, no need to keep it */
+                        self.media_lines.remove(index);
+                    }
                 }
             }
         }

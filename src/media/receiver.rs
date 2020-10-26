@@ -23,6 +23,8 @@ pub enum MediaReceiverEvent {
     DataLost(Vec<u16>),
     /// We've received a control packet
     RtcpPacketReceived(RtcpPacket),
+    /// We've received a bye signal
+    ByeSignalReceived(Option<String>)
 }
 
 pub(crate) enum InternalReceiverEvent {
@@ -95,6 +97,7 @@ pub(crate) trait InternalMediaReceiver : Future<Output = ()> + Unpin {
     fn handle_sender_report(&mut self, report: RtcpPacketSenderReport);
     fn handle_source_description(&mut self, description: &SourceDescription);
     fn handle_extended_report(&mut self, report: RtcpPacketExtendedReport);
+    fn handle_bye(&mut self, reason: &Option<String>);
     fn handle_unknown_rtcp(&mut self, _data: &Vec<u8>);
 
     /// Return true if the receiver has been deleted
@@ -127,6 +130,8 @@ impl InternalMediaReceiver for VoidInternalMediaReceiver {
     fn handle_source_description(&mut self, _description: &SourceDescription) {}
 
     fn handle_extended_report(&mut self, _report: RtcpPacketExtendedReport) {}
+
+    fn handle_bye(&mut self, _reason: &Option<String>) { }
 
     fn handle_unknown_rtcp(&mut self, _data: &Vec<u8>) {}
 
@@ -192,6 +197,10 @@ impl InternalMediaReceiver for ActiveInternalMediaReceiver {
     fn handle_source_description(&mut self, _description: &SourceDescription) {}
 
     fn handle_extended_report(&mut self, _report: RtcpPacketExtendedReport) { }
+
+    fn handle_bye(&mut self, reason: &Option<String>) {
+        let _ = self.event_sender.send(InternalReceiverEvent::MediaEvent(MediaReceiverEvent::ByeSignalReceived(reason.clone())));
+    }
 
     fn handle_unknown_rtcp(&mut self, _data: &Vec<u8>) {}
 

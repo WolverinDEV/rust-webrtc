@@ -17,8 +17,8 @@ impl RtcpPacketBye {
         }
 
         let payload_type = reader.read_u8()?;
-        if payload_type != RtcpPacketType::PayloadFeedback.value() {
-            return Err(Error::new(ErrorKind::InvalidInput, "rtcp packet isn't a feedback packet"));
+        if payload_type != RtcpPacketType::Bye.value() {
+            return Err(Error::new(ErrorKind::InvalidInput, "rtcp packet isn't a bye packet"));
         }
         let _ = reader.read_u16::<BigEndian>()?; /* the total packet length is not from interest */
 

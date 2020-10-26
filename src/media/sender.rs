@@ -102,16 +102,28 @@ impl MediaSender {
         &mut self.contributing_sources
     }
 
+    pub fn current_sequence_no(&self) -> u16 {
+        self.current_sequence_number
+    }
+
+    pub fn current_sequence_no_mut(&mut self) -> &mut u16 {
+        &mut self.current_sequence_number
+    }
+
     pub fn send(&mut self, data: &[u8], marked: bool, timestamp: u32, extension: Option<(u16, &[u8])>) {
         let sequence_no = self.current_sequence_number;
         self.current_sequence_number = self.current_sequence_number.wrapping_add(1);
 
+        self.send_seq(data, sequence_no, marked, timestamp, extension);
+    }
+
+    pub fn send_seq(&self, data: &[u8], seq_no: u16, marked: bool, timestamp: u32, extension: Option<(u16, &[u8])>) {
         let mut packet = rtp_rs::RtpPacketBuilder::new()
             .ssrc(self.id)
             .payload_type(self.payload_type)
             .marked(marked)
             .set_csrc(self.contributing_sources.as_slice())
-            .sequence(Seq::from(sequence_no))
+            .sequence(Seq::from(seq_no))
             .timestamp(timestamp)
             .payload(data);
         if let Some(extension) = extension {

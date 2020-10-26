@@ -112,7 +112,14 @@ async function initializePeerAudio(peer: RTCPeerConnection) {
             noiseSuppression: false
         }
     });
-    microphoneStream.getAudioTracks().forEach(track => peer.addTrack(track));
+    microphoneStream.getAudioTracks().forEach(track => {
+        const sender = peer.addTrack(track);
+        setInterval(() => {
+            console.error("Track set to %o", sender.track ? null : track);
+            sender.replaceTrack(sender.track ? null : track);
+        }, 2000);
+        (window as any).sender = sender;
+    });
     //audioContext.createMediaStreamSource(microphoneStream).connect(audioContext.destination);
 }
 
@@ -272,14 +279,14 @@ async function initializePeer() {
         }
     };
 
-    await initializePeerApplication(peer);
+    //await initializePeerApplication(peer);
 
     const kEnableAudio = true;
     if(kEnableAudio) {
         await initializePeerAudio(peer);
     }
 
-    const kEnableVideo = true;
+    const kEnableVideo = false;
     if(kEnableVideo) {
         await initializePeerVideo(peer);
     }
@@ -302,6 +309,7 @@ async function initializePeer() {
             offerToReceiveAudio: kEnableAudio,
             offerToReceiveVideo: kEnableVideo
         });
+        //offer.sdp = offer.sdp.replace(/111/g, "123");
         await peer.setLocalDescription(offer);
 
         console.log("[SDP] Offer (Nego):\n%s", offer.sdp);
@@ -328,6 +336,28 @@ async function main() {
 
     await connect();
     await initializePeer();
+
+    if(false) {
+        const microphoneStream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+                echoCancellation: false,
+                noiseSuppression: false
+            }
+        });
+        console.error("Have mic");
+        const dest = audioContext.createMediaStreamDestination();
+        audioContext.createMediaStreamSource(microphoneStream).connect(dest);
+
+        const target = document.createElement("audio");
+        target.autoplay = true;
+        target.onpause = () => console.error("Audio pause");
+        target.onloadstart = () => console.error("Start load");
+        target.onplay = () => console.error("Start play");
+        target.srcObject = dest.stream;
+        document.body.append(target);
+
+        console.error(dest.stream.getAudioTracks()[0].getCapabilities());
+    }
 }
 main();
 
