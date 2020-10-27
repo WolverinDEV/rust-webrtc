@@ -72,7 +72,7 @@ impl MediaReceiver {
         let _ = self.control.send(InternalReceiverControl::ResetPendingResends);
     }
 
-    pub fn send_control(&mut self, packet: RtcpPacket) -> Result<(), ControlDataSendError> {
+    pub fn send_control(&mut self, packet: &RtcpPacket) -> Result<(), ControlDataSendError> {
         let mut buffer = [0u8; 2048];
         let write_result = packet.write(&mut buffer);
         if let Err(error) = write_result {
