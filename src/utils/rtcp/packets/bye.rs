@@ -3,7 +3,7 @@ use byteorder::{ReadBytesExt, BigEndian, WriteBytesExt};
 use crate::utils::rtcp::RtcpPacketType;
 
 /// https://tools.ietf.org/html/rfc3550#section-6.6
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct RtcpPacketBye {
     pub src: Vec<u32>,
     pub reason: Option<String>
@@ -56,7 +56,7 @@ impl RtcpPacketBye {
         let reason_length = if let Some(reason) = self.reason.as_ref() { (reason.len() + 3) / 4 } else { 0 };
         writer.write_u8(info as u8)?;
         writer.write_u8(RtcpPacketType::Bye.value())?;
-        writer.write_u16::<BigEndian>((1 + self.src.len() + reason_length) as u16)?;
+        writer.write_u16::<BigEndian>((self.src.len() + reason_length) as u16)?;
 
         for src in self.src.iter() {
             writer.write_u32::<BigEndian>(*src)?;
@@ -77,5 +77,35 @@ impl RtcpPacketBye {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::utils::rtcp::packets::RtcpPacketBye;
+    use std::io::Cursor;
+
+    #[test]
+    fn endecode_no_reason() {
+        let bye = RtcpPacketBye{ src: vec![224, 66668], reason: None };
+        let mut buffer = [0u8; 100];
+        let mut writer = Cursor::new(&mut buffer[..]);
+        bye.write(&mut writer).unwrap();
+        let length = writer.position() as usize;
+
+        let bye_parsed = RtcpPacketBye::parse(&mut Cursor::new(&buffer[0..length])).unwrap();
+        assert_eq!(bye, bye_parsed);
+    }
+
+    #[test]
+    fn endecode_with_reason() {
+        let bye = RtcpPacketBye{ src: vec![224, 66668], reason: Some(String::from("Hello World")) };
+        let mut buffer = [0u8; 100];
+        let mut writer = Cursor::new(&mut buffer[..]);
+        bye.write(&mut writer).unwrap();
+        let length = writer.position() as usize;
+
+        let bye_parsed = RtcpPacketBye::parse(&mut Cursor::new(&buffer[0..length])).unwrap();
+        assert_eq!(bye, bye_parsed);
     }
 }
