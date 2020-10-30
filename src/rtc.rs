@@ -404,7 +404,7 @@ impl PeerConnection {
         registered_media_lines.sort_by_key(|e| e.0);
 
         let mut answer = SdpSession::new(0, SdpOrigin {
-            session_id: rand::random(),
+            session_id: rand::random::<u64>() & 0x7FFF_FFFF_FFFF_FFFF,
             session_version: 2,
             unicast_addr: ExplicitlyTypedAddress::Ip(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
             username: self.origin_username.clone()
