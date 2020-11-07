@@ -3,6 +3,9 @@
 #![feature(btree_drain_filter)]
 #![feature(map_first_last)]
 
+/* for std::intrinsics::breakpoint() */
+#![feature(core_intrinsics)]
+
 use crate::srtp2::srtp2_global_init;
 
 pub mod rtc;

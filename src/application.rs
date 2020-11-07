@@ -286,7 +286,11 @@ impl ChannelApplication {
                 if let Some(channel) = self.internal_channels.get(&internal_channel_id) {
                     let mut channel = RefCell::borrow_mut(channel);
                     if channel.state != DataChannelState::Connecting {
-                        eprintln!("Received OpenAck for channel which isn't in connection state any more");
+                        if !matches!(channel.state, DataChannelState::Closed | DataChannelState::Closing) {
+                            eprintln!("Received OpenAck for channel which isn't in connection state any more");
+                        } else {
+                            /* its fine, we've already closed it */
+                        }
                     } else {
                         channel.state = DataChannelState::Open;
                         let _ = channel.event_sender.send(DataChannelEvent::StateChanged(DataChannelState::Open));

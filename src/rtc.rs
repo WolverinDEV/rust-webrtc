@@ -27,12 +27,15 @@ use crate::utils::RtpPacketResendRequester;
 use crate::sctp::message::DataChannelType;
 use std::time::SystemTime;
 use tokio::time::Duration;
+use std::task::Waker;
 
 /// The default setup type if the remote peer offers active and passive setup
 /// Allowed values are only `RTPTransportSetup::Passive` and `RTPTransportSetup::Active`
 pub const ACT_PASS_DEFAULT_SETUP_TYPE: RTPTransportSetup = RTPTransportSetup::Passive;
 
 pub enum PeerConnectionEvent {
+    PeerReset,
+
     NegotiationNeeded,
     LocalIceCandidate(Option<Candidate>, usize),
 
@@ -78,6 +81,8 @@ pub struct PeerConnection {
     state: PeerConnectionState,
     signalling_state: SignallingState,
 
+    peer_poll_waker: Option<Waker>,
+
     ice_agent: libnice::ice::Agent,
     transport: BTreeMap<u32, Rc<RefCell<RTCTransport>>>,
     media_lines: Vec<Rc<RefCell<MediaLine>>>,
@@ -85,7 +90,8 @@ pub struct PeerConnection {
     stream_receiver: BTreeMap<u32, Box<dyn InternalMediaReceiver>>,
     stream_sender: BTreeMap<u32, RefCell<InternalMediaSender>>,
 
-    application_channel: Box<ChannelApplication>,
+    allow_application_channel: bool,
+    application_channel: Option<Box<ChannelApplication>>,
 
     origin_username: String,
 
@@ -106,6 +112,8 @@ pub enum RemoteDescriptionApplyError {
     UnsupportedMediaType{ media_index: usize },
     InvalidSdp{ reason: String },
     InternalError{ detail: String },
+    ApplicationChannelHasBeenDisabled,
+    ApplicationChannelMissing,
 
     /// The remote description contains less media lines than
     /// we're expecting
@@ -148,6 +156,8 @@ impl PeerConnection {
             state: PeerConnectionState::New,
             signalling_state: SignallingState::None,
 
+            peer_poll_waker: None,
+
             /* "-" indicates no username */
             origin_username: String::from("-"),
 
@@ -157,7 +167,8 @@ impl PeerConnection {
             stream_receiver: BTreeMap::new(),
             stream_sender: BTreeMap::new(),
 
-            application_channel: Box::new(ChannelApplication::new().expect("failed to allocate new application channel")),
+            allow_application_channel: true,
+            application_channel: None,
 
             media_lines: Vec::new(),
             local_events: mpsc::unbounded_channel(),
@@ -179,6 +190,30 @@ impl PeerConnection {
         connection
     }
 
+    /// Create the application channel.
+    /// If create_media_line is not set, transport must point to a valid transport!
+    fn application_channel(&mut self, create_media_line: bool, mut transport: Option<u32>) -> &mut Option<Box<ChannelApplication>> {
+        if !self.application_channel.is_some() && (transport.is_some() || create_media_line) {
+            let mut channel = Box::new(ChannelApplication::new().expect("failed to allocate new application channel"));
+            if create_media_line && self.media_lines.iter().find(|line| RefCell::borrow(line).media_type == SdpMediaValue::Application).is_none() {
+                let media_line = self.allocate_media_line(SdpMediaValue::Application);
+                transport = Some(RefCell::borrow(&media_line).transport_id);
+            }
+
+            let transport = self.transport.get(transport.as_ref().unwrap()).expect("missing media line transport");
+            let transport = RefCell::borrow(transport);
+
+            channel.transport_id = transport.transport_id;
+            channel.transport = Some(transport.control_sender.clone());
+
+            self.application_channel = Some(channel);
+            if let Some(waker) = &self.peer_poll_waker {
+                waker.wake_by_ref();
+            }
+        }
+        &mut self.application_channel
+    }
+
     pub fn media_lines(&self) -> &Vec<Rc<RefCell<MediaLine>>> {
         &self.media_lines
     }
@@ -191,6 +226,22 @@ impl PeerConnection {
     pub fn media_line_by_sdp_index(&self, index: usize) -> Option<Rc<RefCell<MediaLine>>> {
         self.media_lines.iter().find(|e| RefCell::borrow(e).sdp_index() == &Some(index))
             .map(|e| e.clone())
+    }
+
+    pub fn reset(&mut self) {
+        /* drain the local events */
+        while let Ok(_) = self.local_events.1.try_recv() {}
+
+        self.origin_username = String::from("-");
+        self.application_channel = None;
+        self.stream_receiver.clear();
+        self.stream_sender.clear();
+        self.transport.clear();
+
+        self.media_lines.clear();
+        self.signalling_state = SignallingState::None;
+
+        let _ = self.local_events.0.send(PeerConnectionEvent::PeerReset);
     }
 
     pub fn set_remote_description(&mut self, description: &webrtc_sdp::SdpSession, mode: &RtcDescriptionType) -> Result<(), RemoteDescriptionApplyError> {
@@ -255,8 +306,12 @@ impl PeerConnection {
                     .map_err(|err| RemoteDescriptionApplyError::MediaLineParseError { media_line: media_line_index, error: err })?;
 
                 if line.media_type == SdpMediaValue::Application {
-                    self.application_channel.set_remote_description(media)
-                        .map_err(|err| RemoteDescriptionApplyError::MediaChannelConfigure { error: err })?;
+                    if let Some(channel) = &mut self.application_channel {
+                        channel.set_remote_description(media)
+                            .map_err(|err| RemoteDescriptionApplyError::MediaChannelConfigure { error: err })?;
+                    } else {
+                        return Err(RemoteDescriptionApplyError::ApplicationChannelMissing);
+                    }
                 }
 
                 self.update_media_line_streams(media, line.deref_mut(), transport.deref_mut());
@@ -283,14 +338,23 @@ impl PeerConnection {
                 transport_mut.media_lines.push(line.unique_id());
 
                 if line.media_type == SdpMediaValue::Application {
-                    self.application_channel.set_remote_description(media)
+                    if self.application_channel.is_none() && !self.allow_application_channel {
+                        return Err(RemoteDescriptionApplyError::ApplicationChannelHasBeenDisabled);
+                    }
+
+                    let transport_id = Some(transport_mut.transport_id);
+                    drop(transport_mut);
+
+                    let application_channel = self.application_channel(false, transport_id).as_mut().unwrap();
+                    application_channel.set_remote_description(media)
                         .map_err(|err| RemoteDescriptionApplyError::InternalError { detail: String::from(format!("failed to set remote description: {:?}", err)) })?;
-                    self.application_channel.transport = Some(transport_mut.control_sender.clone());
+
                     /* TODO: Trigger the handle_transport_initialized event if the transport has already been initialized */
                     //self.application_channel.handle_transport_initialized();
+                } else {
+                    self.update_media_line_streams(media, &mut line, transport_mut.deref_mut());
                 }
 
-                self.update_media_line_streams(media, &mut line, transport_mut.deref_mut());
                 self.media_lines.push(Rc::new(RefCell::new(line)));
             }
         }
@@ -334,7 +398,7 @@ impl PeerConnection {
 
         for receiver_id in media_line.remote_streams.iter() {
             if self.stream_receiver.contains_key(&receiver_id) {
-                /* TODO: Check if codec or formats have changed! */
+                /* TODO: Check if codec or formats have changed */
                 continue;
             }
 
@@ -421,16 +485,20 @@ impl PeerConnection {
             let media_line = RefCell::borrow(media_line);
             let mut media = {
                 if media_line.media_type == SdpMediaValue::Application {
-                    let mut media = self.application_channel.generate_local_description()
-                        .map_err(|err| CreateAnswerError::InternalError(err))?;
+                    if let Some(channel) = &self.application_channel {
+                        let mut media = channel.generate_local_description()
+                            .map_err(|err| CreateAnswerError::InternalError(err))?;
 
-                    if let Some(media_id) = media_line.media_id() {
-                        media.add_attribute(SdpAttribute::Mid(media_id.clone()))
+                        if let Some(media_id) = media_line.media_id() {
+                            media.add_attribute(SdpAttribute::Mid(media_id.clone()))
+                                .unwrap();
+                        }
+                        media.add_attribute(SdpAttribute::RtcpMux)
                             .unwrap();
+                        media
+                    } else {
+                        return Err(CreateAnswerError::InternalError(String::from("having an application channel media line, but no application channel handle")));
                     }
-                    media.add_attribute(SdpAttribute::RtcpMux)
-                        .unwrap();
-                    media
                 } else {
                     let mut media = media_line.generate_local_description(is_offer)
                         .ok_or(CreateAnswerError::DescribeError(*sdp_index))?;
@@ -495,7 +563,9 @@ impl PeerConnection {
         Ok(answer)
     }
 
-    fn allocate_sender_media_line(&mut self, media_type: SdpMediaValue) -> Rc<RefCell<MediaLine>> {
+    /// Allocate a new media line.
+    /// Attention: This will not wake the peer poll waker it will not be directly negotiated!
+    fn allocate_media_line(&mut self, media_type: SdpMediaValue) -> Rc<RefCell<MediaLine>> {
         for line in self.media_lines.iter() {
             let ref_line = RefCell::borrow(line);
             if ref_line.media_type != media_type { continue; }
@@ -520,7 +590,7 @@ impl PeerConnection {
 
     pub fn create_media_sender(&mut self, media_type: SdpMediaValue) -> MediaSender {
         /* find or create a free media line */
-        let media_line = self.allocate_sender_media_line(media_type);
+        let media_line = self.allocate_media_line(media_type);
         let mut media_line = RefCell::borrow_mut(&media_line);
 
         let mut ssrc = rand::random::<u32>();
@@ -541,12 +611,20 @@ impl PeerConnection {
 
         media_line.local_streams.push(internal_sender.track.id);
         self.stream_sender.insert(internal_sender.track.id, RefCell::new(internal_sender));
+
+        if let Some(waker) = &self.peer_poll_waker {
+            waker.wake_by_ref();
+        }
         sender
     }
 
     pub fn create_data_channel(&mut self, channel_type: DataChannelType, label: String, protocol: Option<String>, priority: u16) -> Result<DataChannel, String> {
-        /* TODO: Trigger renegotiation if we're not yet having a application media line */
-        self.application_channel.create_data_channel(channel_type, label, protocol, priority)
+        if !self.allow_application_channel {
+            Err(String::from("application channels have been disabled"))
+        } else {
+            let channel = self.application_channel(true, None).as_mut().unwrap();
+            channel.create_data_channel(channel_type, label, protocol, priority)
+        }
     }
 
     /// Adding a remote ice candidate.
@@ -624,16 +702,24 @@ impl PeerConnection {
                 println!("Transport state change to {:?}", ice.state());
                 match ice.state() {
                     &RTCTransportState::Connected => {
-                        self.application_channel.handle_transport_connected();
+                        if let Some(channel) = &mut self.application_channel {
+                            channel.handle_transport_connected();
+                        }
                     },
                     _ => {}
                 }
                 None
             },
             RTCTransportEvent::MessageReceivedDtls(message) => {
-                if self.application_channel.transport_id == ice.transport_id {
-                    self.application_channel.handle_data(message);
+                if let Some(channel) = &mut self.application_channel {
+                    if channel.transport_id == ice.transport_id {
+                        channel.handle_data(message);
+                    } else {
+                        unsafe { std::intrinsics::breakpoint() }
+                        /* well that's odd */
+                    }
                 } else {
+                    unsafe { std::intrinsics::breakpoint() }
                     /* well that's odd */
                 }
                 None
@@ -832,6 +918,8 @@ impl futures::stream::Stream for PeerConnection {
     type Item = PeerConnectionEvent;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.peer_poll_waker = Some(cx.waker().clone());
+
         if let Poll::Ready(message) = self.local_events.1.poll_next_unpin(cx) {
             return Poll::Ready(Some(message.expect("unexpected local event stream close")));
         }
@@ -839,14 +927,16 @@ impl futures::stream::Stream for PeerConnection {
         self.poll_stream_receiver(|receiver| if let Poll::Ready(_) = receiver.poll_unpin(&mut Context::from_waker(cx.waker())) { true } else { false });
         self.poll_stream_sender(|sender| if let Poll::Ready(_) = RefCell::borrow_mut(sender).poll_unpin(&mut Context::from_waker(cx.waker())) { true } else { false });
 
-        while let Poll::Ready(event) = self.application_channel.poll_next_unpin(cx) {
-            let event = event.expect("unexpected stream end");
-            match event {
-                ApplicationChannelEvent::DataChannelReceived(channel) => {
-                    return Poll::Ready(Some(PeerConnectionEvent::ReceivedDataChannel(channel)));
-                },
-                ApplicationChannelEvent::StateChanged { new_state: _ } => {
-                    /* TODO: Track the application channel state */
+        if let Some(channel) = &mut self.application_channel {
+            while let Poll::Ready(event) = channel.poll_next_unpin(cx) {
+                let event = event.expect("unexpected stream end");
+                match event {
+                    ApplicationChannelEvent::DataChannelReceived(channel) => {
+                        return Poll::Ready(Some(PeerConnectionEvent::ReceivedDataChannel(channel)));
+                    },
+                    ApplicationChannelEvent::StateChanged { new_state: _ } => {
+                        /* TODO: Track the application channel state */
+                    }
                 }
             }
         }

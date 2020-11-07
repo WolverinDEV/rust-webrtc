@@ -25,6 +25,7 @@ use webrtc_lib::utils::rtcp::RtcpPacket;
 use webrtc_lib::utils::rtcp::packets::{RtcpPacketPayloadFeedback, RtcpPayloadFeedback};
 use futures::future::{Abortable, AbortHandle};
 use crate::shared::execute_example;
+use webrtc_lib::sctp::message::DataChannelType;
 
 mod shared;
 mod video;
@@ -185,7 +186,7 @@ fn spawn_client_peer(client: &mut Client<ClientData>) {
                                         if stream.request_pli {
                                             stream.request_pli = false;
                                             receiver.reset_pending_resends();
-                                            let _ = receiver.send_control(RtcpPacket::PayloadFeedback(RtcpPacketPayloadFeedback{
+                                            let _ = receiver.send_control(&RtcpPacket::PayloadFeedback(RtcpPacketPayloadFeedback{
                                                 ssrc: stream.sender.id,
                                                 media_ssrc: receiver.id,
                                                 feedback: RtcpPayloadFeedback::PictureLossIndication
@@ -230,6 +231,11 @@ fn spawn_client_peer(client: &mut Client<ClientData>) {
                                             if let Some(stream) = video_stream.lock().unwrap().as_mut() {
                                                 stream.sender.register_property(String::from("msid"), Some(String::from("NewChannel? -")));
                                             }
+                                        } else if text == "create-dc" {
+                                            if let Some(peer) = weak_peer.upgrade() {
+                                                let mut dc = peer.lock().unwrap().create_data_channel(DataChannelType::Reliable, String::from("xxx"), None, 1).unwrap();
+                                                dc.send_text_message(Some(String::from("Hey!")));
+                                            }
                                         }
                                         let _ = channel.send_text_message(Some(text));
                                     }
@@ -250,7 +256,8 @@ fn spawn_client_peer(client: &mut Client<ClientData>) {
                     if let Err(err) = send_local_description(&mut command_pipe, peer.deref_mut(), String::from("offer")) {
                         eprintln!("Failed to send local description: {}", err);
                     }
-                }
+                },
+                PeerConnectionEvent::PeerReset => {}
             }
         }
 

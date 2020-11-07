@@ -279,9 +279,9 @@ async function initializePeer() {
         }
     };
 
-    //await initializePeerApplication(peer);
+    await initializePeerApplication(peer);
 
-    const kEnableAudio = true;
+    const kEnableAudio = false;
     if(kEnableAudio) {
         await initializePeerAudio(peer);
     }

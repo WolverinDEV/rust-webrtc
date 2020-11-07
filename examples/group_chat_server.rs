@@ -244,7 +244,7 @@ fn broadcast_client_media(client: Arc<Mutex<Client<ClientData>>>, locked_client:
             if request_pli {
                 receiver.reset_pending_resends();
                 let id = receiver.id;
-                let _ = receiver.send_control(RtcpPacket::PayloadFeedback(RtcpPacketPayloadFeedback{
+                let _ = receiver.send_control(&RtcpPacket::PayloadFeedback(RtcpPacketPayloadFeedback{
                     ssrc: 1,
                     media_ssrc: id,
                     feedback: RtcpPayloadFeedback::PictureLossIndication
@@ -375,7 +375,8 @@ fn execute_client_peer(client: Arc<Mutex<Client<ClientData>>>, locked_client: &m
                     if let Err(err) = send_local_description(&mut command_pipe, &mut locked_client.data.peer, String::from("offer")) {
                         eprintln!("Failed to send local description: {}", err);
                     }
-                }
+                },
+                PeerConnectionEvent::PeerReset => {}
             }
         }
 
