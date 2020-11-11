@@ -376,7 +376,7 @@ fn execute_client_peer(client: Arc<Mutex<Client<ClientData>>>, locked_client: &m
                         eprintln!("Failed to send local description: {}", err);
                     }
                 },
-                PeerConnectionEvent::PeerReset => {}
+                _ => {}
             }
         }
 

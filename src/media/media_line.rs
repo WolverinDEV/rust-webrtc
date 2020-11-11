@@ -223,7 +223,7 @@ impl MediaLine {
             ttl: None,
             amount: None
         }).unwrap();
-        media.add_attribute(SdpAttribute::RtcpMux).unwrap();
+
         if let Some(media_id) = &self.media_id {
             media.add_attribute(SdpAttribute::Mid(media_id.clone())).unwrap();
         }

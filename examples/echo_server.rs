@@ -257,7 +257,7 @@ fn spawn_client_peer(client: &mut Client<ClientData>) {
                         eprintln!("Failed to send local description: {}", err);
                     }
                 },
-                PeerConnectionEvent::PeerReset => {}
+                _ => {}
             }
         }
 

@@ -98,6 +98,8 @@ pub(crate) trait InternalMediaReceiver : Future<Output = ()> + Unpin {
     fn handle_source_description(&mut self, description: &SourceDescription);
     fn handle_extended_report(&mut self, report: RtcpPacketExtendedReport);
     fn handle_bye(&mut self, reason: &Option<String>);
+
+    /// This method will only be called, if dispatch_unknown_packets has been set on the peer connection
     fn handle_unknown_rtcp(&mut self, _data: &Vec<u8>);
 
     /// Return true if the receiver has been deleted

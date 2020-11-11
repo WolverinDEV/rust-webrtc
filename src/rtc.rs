@@ -10,7 +10,7 @@ use futures::task::{Context, Poll};
 use tokio::macros::support::Pin;
 use std::rc::Rc;
 use std::cell::{RefCell, RefMut};
-use std::collections::{HashMap, BTreeMap};
+use std::collections::{HashMap, BTreeMap, VecDeque};
 use crate::transport::{RTCTransport, RTCTransportInitializeError, ICECredentials, RTCTransportEvent, RTCTransportICECandidateAddError, RTCTransportState, RTPTransportSetup, RTCTransportDescriptionApplyError};
 use webrtc_sdp::{SdpSession, SdpOrigin, SdpTiming};
 use webrtc_sdp::address::ExplicitlyTypedAddress;
@@ -25,9 +25,9 @@ use std::ops::{DerefMut};
 use tokio::sync::mpsc;
 use crate::utils::RtpPacketResendRequester;
 use crate::sctp::message::DataChannelType;
-use std::time::SystemTime;
-use tokio::time::Duration;
 use std::task::Waker;
+use std::io::Error;
+use rtp_rs::RtpReaderError;
 
 /// The default setup type if the remote peer offers active and passive setup
 /// Allowed values are only `RTPTransportSetup::Passive` and `RTPTransportSetup::Active`
@@ -42,8 +42,22 @@ pub enum PeerConnectionEvent {
     ReceivedRemoteStream(MediaReceiver),
     ReceivedDataChannel(DataChannel),
 
+    /// This event will only be fired if dispatch_unassignable_packets has been enabled
     UnassignableRtcpPacket(RtcpPacket),
+    /// This event will only be fired if dispatch_unassignable_packets has been enabled
     UnassignableRtpPacket(ParsedRtpPacket),
+    /// This event will only be fired if dispatch_unassignable_packets has been enabled.
+    /// If this event gets received it means that we've received application channel data
+    /// without having an application channel initialized.
+    /// This most likely indicates that something went horrible wong when exchanging the sdp.
+    UnassignableDtlsPacket(Vec<u8>),
+
+    /// This event will only be fired if dispatch_undecodable_packets has been enabled.
+    /// Attention: The buffer may contains multiple RTCP packets chained to each other.
+    /// If so we failed to split them up.
+    UndecodableRtcpPacket(Vec<u8>, Error),
+    /// This event will only be fired if dispatch_undecodable_packets has been enabled
+    UndecodableRtpPacket(Vec<u8>, RtpReaderError)
 }
 
 #[derive(Debug, PartialOrd, PartialEq, Clone)]
@@ -94,14 +108,11 @@ pub struct PeerConnection {
     application_channel: Option<Box<ChannelApplication>>,
 
     origin_username: String,
+    event_queue: VecDeque<PeerConnectionEvent>,
 
-    /*
-     * TODO: Does this really needs to be a unbound server/receiver or could we better use something else?
-     * DeVec for example (but what's about memory growth?)
-     */
-    local_events: (mpsc::UnboundedSender<PeerConnectionEvent>, mpsc::UnboundedReceiver<PeerConnectionEvent>),
-
-    last_rtp_decode_failed_timestamp: SystemTime
+    dispatch_unassignable_packets: bool,
+    dispatch_unknown_packets: bool,
+    dispatch_undecodable_packets: bool
 }
 
 #[derive(Debug)]
@@ -171,9 +182,11 @@ impl PeerConnection {
             application_channel: None,
 
             media_lines: Vec::new(),
-            local_events: mpsc::unbounded_channel(),
+            event_queue: VecDeque::with_capacity(32),
 
-            last_rtp_decode_failed_timestamp: SystemTime::UNIX_EPOCH
+            dispatch_unknown_packets: true,
+            dispatch_unassignable_packets: true,
+            dispatch_undecodable_packets: true,
         };
 
         connection.ice_agent.get_ffi_agent().on_selected_pair(|_, _, _, _| println!("Candidate pair has been found")).unwrap();
@@ -188,6 +201,13 @@ impl PeerConnection {
         connection.ice_agent.get_ffi_agent().set_nice_property(NiceAgentProperty::IceTrickle(true)).unwrap();
 
         connection
+    }
+
+    fn dispatch_peer_event(&mut self, event: PeerConnectionEvent) {
+        self.event_queue.push_back(event);
+        if let Some(waker) = &self.peer_poll_waker {
+            waker.wake_by_ref()
+        }
     }
 
     /// Create the application channel.
@@ -229,8 +249,7 @@ impl PeerConnection {
     }
 
     pub fn reset(&mut self) {
-        /* drain the local events */
-        while let Ok(_) = self.local_events.1.try_recv() {}
+        self.event_queue.clear();
 
         self.origin_username = String::from("-");
         self.application_channel = None;
@@ -241,7 +260,7 @@ impl PeerConnection {
         self.media_lines.clear();
         self.signalling_state = SignallingState::None;
 
-        let _ = self.local_events.0.send(PeerConnectionEvent::PeerReset);
+        self.dispatch_peer_event(PeerConnectionEvent::PeerReset);
     }
 
     pub fn set_remote_description(&mut self, description: &webrtc_sdp::SdpSession, mode: &RtcDescriptionType) -> Result<(), RemoteDescriptionApplyError> {
@@ -432,7 +451,7 @@ impl PeerConnection {
                 control: ctx
             };
 
-            let _ = self.local_events.0.send(PeerConnectionEvent::ReceivedRemoteStream(receiver));
+            self.dispatch_peer_event(PeerConnectionEvent::ReceivedRemoteStream(receiver));
             self.stream_receiver.insert(*receiver_id, Box::new(internal_receiver));
         }
     }
@@ -493,8 +512,6 @@ impl PeerConnection {
                             media.add_attribute(SdpAttribute::Mid(media_id.clone()))
                                 .unwrap();
                         }
-                        media.add_attribute(SdpAttribute::RtcpMux)
-                            .unwrap();
                         media
                     } else {
                         return Err(CreateAnswerError::InternalError(String::from("having an application channel media line, but no application channel handle")));
@@ -561,6 +578,14 @@ impl PeerConnection {
         }
 
         Ok(answer)
+    }
+
+    /// Return the number of free media lines which are not yet in use by a sender.
+    pub fn free_send_media_lines(&self, media_type: SdpMediaValue) -> usize {
+        self.media_lines.iter()
+            .map(|e| RefCell::borrow(e))
+            .filter(|e| e.media_type == media_type && e.local_streams.is_empty())
+            .count()
     }
 
     /// Allocate a new media line.
@@ -677,28 +702,26 @@ impl PeerConnection {
             .map(|e| e.1)
     }
 
-    fn handle_ice_event(&mut self, ice: &mut RefMut<RTCTransport>, event: RTCTransportEvent) -> Option<PeerConnectionEvent> {
+    fn handle_ice_event(&mut self, ice: &mut RefMut<RTCTransport>, event: RTCTransportEvent) {
         match event {
             RTCTransportEvent::LocalIceCandidate(candidate) => {
                 let media_line = self.media_line_by_unique_id(ice.owning_media_line);
                 if let Some(Some(index)) = media_line.as_ref().map(|e| RefCell::borrow(e).sdp_index().clone()) {
-                    return Some(PeerConnectionEvent::LocalIceCandidate(Some(candidate.into()), index));
+                    self.dispatch_peer_event(PeerConnectionEvent::LocalIceCandidate(Some(candidate.into()), index));
                 } else {
                     /* We received an ICE candidate for an not yet registered media line */
-                    None
                 }
             },
             RTCTransportEvent::LocalIceGatheringFinished() => {
                 let media_line = self.media_line_by_unique_id(ice.owning_media_line);
                 if let Some(Some(index)) = media_line.map(|e| RefCell::borrow(&e).sdp_index().clone()) {
-                    return Some(PeerConnectionEvent::LocalIceCandidate(None, index));
+                    self.dispatch_peer_event(PeerConnectionEvent::LocalIceCandidate(None, index));
                 } else {
                     /* We received an ICE candidate gathering finished signal for an not yet registered media line */
-                    None
                 }
             },
             RTCTransportEvent::TransportStateChanged => {
-                /* TODO: Propagate state changes from Connected to any thing else to the streams */
+                /* TODO: Improve state change handling. This specially applies to transport failures */
                 println!("Transport state change to {:?}", ice.state());
                 match ice.state() {
                     &RTCTransportState::Connected => {
@@ -708,28 +731,26 @@ impl PeerConnection {
                     },
                     _ => {}
                 }
-                None
             },
             RTCTransportEvent::MessageReceivedDtls(message) => {
                 if let Some(channel) = &mut self.application_channel {
                     if channel.transport_id == ice.transport_id {
                         channel.handle_data(message);
-                    } else {
-                        unsafe { std::intrinsics::breakpoint() }
-                        /* well that's odd */
+                    } else if self.dispatch_unassignable_packets {
+                        self.dispatch_peer_event(PeerConnectionEvent::UnassignableDtlsPacket(message));
                     }
-                } else {
-                    unsafe { std::intrinsics::breakpoint() }
-                    /* well that's odd */
+                } else if self.dispatch_unassignable_packets {
+                    self.dispatch_peer_event(PeerConnectionEvent::UnassignableDtlsPacket(message));
                 }
-                None
             },
             RTCTransportEvent::MessageReceivedRtcp(message) => {
                 let mut packets = [&[0u8][..]; 128];
                 let packet_count = RtcpPacket::split_up_packets(message.as_slice(), &mut packets[..]);
                 if let Err(error) = packet_count {
-                    eprintln!("Received invalid merged packet: {:?}", error);
-                    return None;
+                    if self.dispatch_undecodable_packets {
+                        self.dispatch_peer_event(PeerConnectionEvent::UndecodableRtcpPacket(message, error));
+                    }
+                    return;
                 }
 
                 for index in 0..packet_count.unwrap() {
@@ -771,8 +792,8 @@ impl PeerConnection {
                                 RtcpPacket::SenderReport(sr) => {
                                     if let Some(receiver) = self.stream_receiver.get_mut(&sr.ssrc) {
                                         receiver.handle_sender_report(sr);
-                                    } else {
-                                        let _ = self.local_events.0.send(PeerConnectionEvent::UnassignableRtcpPacket(RtcpPacket::SenderReport(sr)));
+                                    } else if self.dispatch_unassignable_packets {
+                                        self.dispatch_peer_event(PeerConnectionEvent::UnassignableRtcpPacket(RtcpPacket::SenderReport(sr)));
                                     }
                                 },
                                 RtcpPacket::SourceDescription(sd) => {
@@ -792,15 +813,15 @@ impl PeerConnection {
                                 RtcpPacket::TransportFeedback(fb) => {
                                     if let Some(sender) = self.stream_sender.get(&fb.media_ssrc) {
                                         RefCell::borrow_mut(sender).handle_transport_feedback(fb.feedback);
-                                    } else {
-                                        let _ = self.local_events.0.send(PeerConnectionEvent::UnassignableRtcpPacket(RtcpPacket::TransportFeedback(fb)));
+                                    } else if self.dispatch_unassignable_packets {
+                                        self.dispatch_peer_event(PeerConnectionEvent::UnassignableRtcpPacket(RtcpPacket::TransportFeedback(fb)));
                                     }
                                 },
                                 RtcpPacket::PayloadFeedback(pfb) => {
                                     if let Some(sender) = self.stream_sender.get(&pfb.media_ssrc) {
                                         RefCell::borrow_mut(sender).handle_payload_feedback(pfb.feedback);
-                                    } else {
-                                        let _ = self.local_events.0.send(PeerConnectionEvent::UnassignableRtcpPacket(RtcpPacket::PayloadFeedback(pfb)));
+                                    } else if self.dispatch_unassignable_packets {
+                                        self.dispatch_peer_event(PeerConnectionEvent::UnassignableRtcpPacket(RtcpPacket::PayloadFeedback(pfb)));
                                     }
                                 },
                                 RtcpPacket::ExtendedReport(xr) => {
@@ -814,26 +835,31 @@ impl PeerConnection {
                                         let _ = self.local_events.0.send(PeerConnectionEvent::UnassignableRtcpPacket(RtcpPacket::ExtendedReport(xr)));
                                     }
                                     */
-                                    let _ = self.local_events.0.send(PeerConnectionEvent::UnassignableRtcpPacket(RtcpPacket::ExtendedReport(xr)));
+                                    if self.dispatch_unassignable_packets {
+                                        self.dispatch_peer_event(PeerConnectionEvent::UnassignableRtcpPacket(RtcpPacket::ExtendedReport(xr)));
+                                    }
                                 },
                                 RtcpPacket::Unknown(data) => {
-                                    self.stream_receiver.iter_mut().for_each(|receiver|
-                                        receiver.1.handle_unknown_rtcp(&data)
-                                    );
+                                    if self.dispatch_unknown_packets {
+                                        self.stream_receiver.iter_mut().for_each(|receiver|
+                                            receiver.1.handle_unknown_rtcp(&data)
+                                        );
 
-                                    self.stream_sender.iter().for_each(|sender|
-                                        RefCell::borrow_mut(sender.1).handle_unknown_rtcp(&data)
-                                    );
+                                        self.stream_sender.iter().for_each(|sender|
+                                            RefCell::borrow_mut(sender.1).handle_unknown_rtcp(&data)
+                                        );
+                                    }
                                 }
                                 _ => {}
                             }
                         },
                         Err(error) => {
-                            eprintln!("Failed to decode RTCP packet: {:?}", error);
+                            if self.dispatch_undecodable_packets {
+                                self.dispatch_peer_event(PeerConnectionEvent::UndecodableRtcpPacket(packets[index].to_owned(), error));
+                            }
                         }
                     }
                 }
-                None
             },
             RTCTransportEvent::MessageReceivedRtp(message) => {
                 match ParsedRtpPacket::new(message) {
@@ -844,27 +870,23 @@ impl PeerConnection {
                             } else {
                                 receiver.handle_rtp_packet(reader);
                             }
-                        } else {
-                            let _ = self.local_events.0.send(PeerConnectionEvent::UnassignableRtpPacket(reader));
+                        } else if self.dispatch_unassignable_packets {
+                            self.dispatch_peer_event(PeerConnectionEvent::UnassignableRtpPacket(reader));
                         }
                     },
-                    Err((error, _)) => {
-                        let now = SystemTime::now();
-                        let timeout = Duration::from_secs(1);
-                        if now.duration_since(self.last_rtp_decode_failed_timestamp).unwrap_or(timeout) >= timeout {
-                            self.last_rtp_decode_failed_timestamp = now;
-                            eprintln!("Failed to decode RTP packet: {:?}", error);
+                    Err((error, message)) => {
+                        if self.dispatch_undecodable_packets {
+                            self.dispatch_peer_event(PeerConnectionEvent::UndecodableRtpPacket(message, error));
                         }
                     }
                 }
-                None
             },
             RTCTransportEvent::MessageDropped(message) => {
+                /* This is for internal debug only */
                 println!("Dropping received ICE message of length {}", message.len());
-                None
             },
             _ => {
-                None
+                /* XXX: Explicitly handle all events? */
             }
         }
 
@@ -920,8 +942,9 @@ impl futures::stream::Stream for PeerConnection {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.peer_poll_waker = Some(cx.waker().clone());
 
-        if let Poll::Ready(message) = self.local_events.1.poll_next_unpin(cx) {
-            return Poll::Ready(Some(message.expect("unexpected local event stream close")));
+        /* firstly process all pending events before generating new once */
+        if let Some(message) = self.event_queue.pop_front() {
+            return Poll::Ready(Some(message));
         }
 
         self.poll_stream_receiver(|receiver| if let Poll::Ready(_) = receiver.poll_unpin(&mut Context::from_waker(cx.waker())) { true } else { false });
@@ -946,9 +969,7 @@ impl futures::stream::Stream for PeerConnection {
             let mut stream = RefCell::borrow_mut(stream);
             while let Poll::Ready(event) = stream.poll_next_unpin(cx) {
                 if let Some(event) = event {
-                    if let Some(event) = self.handle_ice_event(&mut stream, event) {
-                        return Poll::Ready(Some(event));
-                    }
+                    self.handle_ice_event(&mut stream, event);
                 } else {
                     /* TODO: It's not unexpected if receive some kind of error previously. We need some error handing beforehand */
                     panic!("Unexpected ICE exit");
@@ -973,6 +994,11 @@ impl futures::stream::Stream for PeerConnection {
                 self.signalling_state = SignallingState::NegotiationRequired;
                 return Poll::Ready(Some(PeerConnectionEvent::NegotiationNeeded));
             }
+        }
+
+        /* The actions above may have invoked some events. If so return them. */
+        if let Some(message) = self.event_queue.pop_front() {
+            return Poll::Ready(Some(message));
         }
 
         Poll::Pending

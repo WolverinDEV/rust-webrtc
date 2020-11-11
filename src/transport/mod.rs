@@ -133,6 +133,7 @@ pub enum RTCTransportDescriptionApplyError {
     MissingPassword,
     MissingFingerprint,
     MissingSetup,
+    MissingRtcpMux,
 
     InvalidSetupValue,
     /// We've locally a contradicting setup value for the remote peer.
@@ -348,6 +349,7 @@ impl RTCTransport {
     }
 
     pub fn generate_local_description(&self, media: &mut SdpMedia) -> Result<(), SdpParserInternalError> {
+        media.add_attribute(SdpAttribute::RtcpMux)?;
         media.add_attribute(SdpAttribute::IceUfrag(self.local_state.credentials.username.clone()))?;
         media.add_attribute(SdpAttribute::IcePwd(self.local_state.credentials.password.clone()))?;
         media.add_attribute(SdpAttribute::IceOptions(vec![String::from("trickle")]))?;
@@ -355,9 +357,9 @@ impl RTCTransport {
         match &self.setup {
             RTPTransportSetup::Unset |
             RTPTransportSetup::Actpass => media.add_attribute(SdpAttribute::Setup(SdpAttributeSetup::Actpass))?,
-            RTPTransportSetup::Active =>    media.add_attribute(SdpAttribute::Setup(SdpAttributeSetup::Active))?,
-            RTPTransportSetup::Passive =>    media.add_attribute(SdpAttribute::Setup(SdpAttributeSetup::Passive))?,
-            RTPTransportSetup::Holdconn =>    media.add_attribute(SdpAttribute::Setup(SdpAttributeSetup::Holdconn))?,
+            RTPTransportSetup::Active => media.add_attribute(SdpAttribute::Setup(SdpAttributeSetup::Active))?,
+            RTPTransportSetup::Passive => media.add_attribute(SdpAttribute::Setup(SdpAttributeSetup::Passive))?,
+            RTPTransportSetup::Holdconn => media.add_attribute(SdpAttribute::Setup(SdpAttributeSetup::Holdconn))?,
         }
         for candidate in self.local_candidates.iter() {
             media.add_attribute(SdpAttribute::Candidate(candidate.deref().clone()))?;
@@ -366,6 +368,10 @@ impl RTCTransport {
     }
 
     pub fn apply_remote_description(&mut self, _media_line: u32, media: &SdpMedia) -> Result<(), RTCTransportDescriptionApplyError> {
+        if media.get_attribute(SdpAttributeType::RtcpMux).is_none() {
+            /* We're currently only supporting RtcpMux */
+            return Err(RTCTransportDescriptionApplyError::MissingRtcpMux);
+        }
         let username = if let Some(SdpAttribute::IceUfrag(username)) = media.get_attribute(SdpAttributeType::IceUfrag) {
             username
         } else {
