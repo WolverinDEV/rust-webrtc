@@ -30,10 +30,18 @@ pub mod packet_history;
 mod sender;
 pub use sender::*;
 use std::sync::{Arc, Mutex};
-use webrtc_sdp::media_type::SdpMedia;
+use webrtc_sdp::media_type::{SdpMedia, SdpMediaValue};
 use webrtc_sdp::error::SdpParserInternalError;
 use crate::rtc::ACT_PASS_DEFAULT_SETUP_TYPE;
 use glib::BoolError;
+
+use slog::{
+    o,
+    slog_trace,
+    slog_debug,
+    slog_info,
+    slog_error
+};
 
 #[derive(Clone)]
 pub struct DebugableCandidate {
@@ -68,6 +76,7 @@ pub struct ICECredentials {
 pub enum RTCTransportFailReason {
     DtlsInitFailed,
     DtlsError,
+    DtlsEncryptError,
     DtlsEof,
 
     IceFinished,
@@ -80,7 +89,7 @@ pub enum RTCTransportState {
     Disconnected,
     Connecting,
     Connected,
-    Failed(RTCTransportFailReason)
+    UnrecoverableFailed(RTCTransportFailReason)
 }
 
 #[derive(Clone, Debug)]
@@ -170,6 +179,8 @@ pub enum RTPTransportSetup {
 }
 
 pub struct RTCTransport {
+    logger: slog::Logger,
+
     /// A unique id identifying this transport
     pub transport_id: u32,
 
@@ -285,7 +296,8 @@ impl RTCTransport {
     }
 
     pub fn new(mut stream: libnice::ice::Stream,
-               media_line: u32) -> Result<RTCTransport, RTCTransportInitializeError> {
+               media_line: u32,
+               parent_logger: &slog::Logger) -> Result<RTCTransport, RTCTransportInitializeError> {
         assert_eq!(stream.components().len(), 1, "expected only one stream component");
 
 
@@ -299,9 +311,11 @@ impl RTCTransport {
         };
 
         let (ctx, crx) = mpsc::unbounded_channel();
+        let id = TRANSPORT_ID_INDEX.fetch_add(1, Ordering::Relaxed);
 
         let connection = RTCTransport {
-            transport_id: TRANSPORT_ID_INDEX.fetch_add(1, Ordering::Relaxed),
+            logger: parent_logger.new(o!("transport-id" => id, "ice-stream" => stream.stream_id())),
+            transport_id: id,
 
             owning_media_line: media_line,
             media_lines: Vec::with_capacity(3),
@@ -349,7 +363,10 @@ impl RTCTransport {
     }
 
     pub fn generate_local_description(&self, media: &mut SdpMedia) -> Result<(), SdpParserInternalError> {
-        media.add_attribute(SdpAttribute::RtcpMux)?;
+        if media.get_type() != &SdpMediaValue::Application {
+            media.add_attribute(SdpAttribute::RtcpMux)?;
+        }
+
         media.add_attribute(SdpAttribute::IceUfrag(self.local_state.credentials.username.clone()))?;
         media.add_attribute(SdpAttribute::IcePwd(self.local_state.credentials.password.clone()))?;
         media.add_attribute(SdpAttribute::IceOptions(vec![String::from("trickle")]))?;
@@ -368,10 +385,11 @@ impl RTCTransport {
     }
 
     pub fn apply_remote_description(&mut self, _media_line: u32, media: &SdpMedia) -> Result<(), RTCTransportDescriptionApplyError> {
-        if media.get_attribute(SdpAttributeType::RtcpMux).is_none() {
+        if media.get_attribute(SdpAttributeType::RtcpMux).is_none() && media.get_type() != &SdpMediaValue::Application {
             /* We're currently only supporting RtcpMux */
             return Err(RTCTransportDescriptionApplyError::MissingRtcpMux);
         }
+
         let username = if let Some(SdpAttribute::IceUfrag(username)) = media.get_attribute(SdpAttributeType::IceUfrag) {
             username
         } else {
@@ -484,7 +502,7 @@ impl RTCTransport {
     }
 
     pub fn add_remote_candidate(&mut self, candidate: Option<&Candidate>) -> Result<(), RTCTransportICECandidateAddError> {
-        if let RTCTransportState::Failed(..) = &self.state {
+        if let RTCTransportState::UnrecoverableFailed(..) = &self.state {
             /* TODO: Should we really return ok here? */
             return Ok(());
         }
@@ -546,7 +564,7 @@ impl RTCTransport {
                         });
                     },
                     Err(err) => {
-                        eprintln!("Failed to initialize srtp from openssl init: {:?}", err);
+                        slog_error!(self.logger, "Failed to initialize srtp from openssl init: {:?}", err);
                         self.failure_tear_down(RTCTransportFailReason::DtlsInitFailed);
                         return Some(RTCTransportEvent::TransportStateChanged);
                     }
@@ -563,13 +581,15 @@ impl RTCTransport {
                         None
                     },
                     ssl::HandshakeError::Failure(handshake) => {
-                        println!("HS failed: {:?}", handshake.error());
+                        slog_error!(self.logger, "DTLS handshake failure. Error: {:?}", handshake.error());
+
                         self.dtls = Some(DTLSState::Failed());
                         self.failure_tear_down(RTCTransportFailReason::DtlsInitFailed);
                         Some(RTCTransportEvent::TransportStateChanged)
                     },
                     ssl::HandshakeError::SetupFailure(error) => {
-                        println!("HS setup error: {:?}", error);
+                        slog_error!(self.logger, "DTLS handshake setup failure. Error: {:?}", error);
+
                         self.dtls = Some(DTLSState::Failed());
                         self.failure_tear_down(RTCTransportFailReason::DtlsInitFailed);
                         Some(RTCTransportEvent::TransportStateChanged)
@@ -598,12 +618,12 @@ impl RTCTransport {
                         if err == Srtp2ErrorCode::ReplayFail {
                             /* we've probably re-requested the packet twice */
                         } else {
-                            eprintln!("Failed to unprotect rtp packet: {:?}", err);
+                            slog_trace!(self.logger, "Failed to unprotect rtp packet: {:?}", err);
                         }
                     }
                 }
             } else {
-                eprintln!("Received SRTCP data, but we've not initialized srtp yet.");
+                slog_trace!(self.logger, "Received SRTCP data, but we've not initialized srtp yet. Dropping data.");
             }
         } else if is_rtcp_header(data.as_slice()) {
             if let Some(srtp) = &self.srtp_in {
@@ -613,20 +633,20 @@ impl RTCTransport {
                         return Some(RTCTransportEvent::MessageReceivedRtcp(data));
                     },
                     Err(err) => {
-                        eprintln!("Failed to unprotect rtcp packet: {:?}", err);
+                        slog_trace!(self.logger, "Failed to unprotect rtcp packet: {:?}", err);
                     }
                 }
             } else {
-                eprintln!("Received SRTP data, but we've not initialized srtp yet.");
+                slog_trace!(self.logger, "Received SRTP data, but we've not initialized srtp yet. Dropping data.");
             }
         } else {
-            eprintln!("Received non DTLS, RTP or RTCP data. Dropping data.");
+            slog_trace!(self.logger, "Received non DTLS, RTP or RTCP data. Dropping data.");
         }
         None
     }
 
     fn failure_tear_down(&mut self, reason: RTCTransportFailReason) {
-        self.state = RTCTransportState::Failed(reason);
+        self.state = RTCTransportState::UnrecoverableFailed(reason);
 
         /* cleanup the resources */
         self.dtls = None;
@@ -636,7 +656,7 @@ impl RTCTransport {
     }
 
     fn update_state(&mut self) {
-        if let RTCTransportState::Failed(..) = self.state {
+        if let RTCTransportState::UnrecoverableFailed(..) = self.state {
             return;
         }
 
@@ -678,7 +698,7 @@ impl Stream for RTCTransport {
             return Poll::Ready(Some(self.pending_events.pop_front().unwrap()));
         }
 
-        if let RTCTransportState::Failed(..) = self.state {
+        if let RTCTransportState::UnrecoverableFailed(..) = self.state {
             /* we can't do anything... */
             return Poll::Pending;
         }
@@ -705,7 +725,7 @@ impl Stream for RTCTransport {
 
             ice_state = component.get_state();
             if ice_state != self.last_ice_state {
-                println!("ICE state change from {:?} to {:?}", self.last_ice_state, ice_state);
+                slog_trace!(self.logger, "ICE stream changed the state from {:?} to {:?}", self.last_ice_state, ice_state);
                 self.last_ice_state = ice_state;
                 if ice_state == ComponentState::Failed {
                     self.failure_tear_down(RTCTransportFailReason::IceFailure);
@@ -786,7 +806,8 @@ impl Stream for RTCTransport {
                         match &error.kind() {
                             &ErrorKind::WouldBlock => { /* nothing to do */ },
                             _ => {
-                                eprintln!("Received DTLS read error: {}", &error);
+                                slog_error!(self.logger, "Received DTLS read error: {:?}", &error);
+
                                 self.failure_tear_down(RTCTransportFailReason::DtlsError);
                                 return Poll::Ready(Some(RTCTransportEvent::TransportStateChanged));
                             }
@@ -802,11 +823,17 @@ impl Stream for RTCTransport {
             match message {
                 RTCTransportControl::SendMessage(buffer) => {
                     if let Some(DTLSState::Connected(stream)) = &mut self.dtls {
-                        /* TODO: Is it possible, that this even happens? */
-                        stream.write(&buffer)
-                            .expect("failed to send message via dtls");
+                        if let Err(error) = stream.write(&buffer) {
+                            /*
+                             * XXX: What does it even means when stream.write fails?
+                             * Something really odd must be happened with out underlying buffer, aka the ICE stream
+                             */
+                            slog_error!(self.logger, "Failed to encrypt a message: {:?}. Turning down transport.", &error);
+                            self.failure_tear_down(RTCTransportFailReason::DtlsEncryptError);
+                            return Poll::Ready(Some(RTCTransportEvent::TransportStateChanged));
+                        }
                     } else {
-                        eprintln!("Tried to send a dtls message without an active session");
+                        slog_error!(self.logger, "Tried to send DTLS data without a connected dtls session. Dropping data.");
                     }
                 }
             }

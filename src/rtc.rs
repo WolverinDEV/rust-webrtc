@@ -16,7 +16,7 @@ use webrtc_sdp::{SdpSession, SdpOrigin, SdpTiming};
 use webrtc_sdp::address::ExplicitlyTypedAddress;
 use std::net::{IpAddr, Ipv4Addr};
 use libnice::ffi::{NiceCompatibility, NiceAgentProperty};
-use libnice::sys::NiceAgentOption_NICE_AGENT_OPTION_ICE_TRICKLE;
+use libnice::sys::{NiceAgentOption_NICE_AGENT_OPTION_ICE_TRICKLE, NiceCandidate};
 use crate::application::{ChannelApplication, DataChannel, ApplicationChannelEvent};
 use crate::media::{MediaLine, MediaLineParseError, ActiveInternalMediaReceiver, MediaReceiver, InternalMediaSender, InternalMediaTrack, MediaSender, NegotiationState, InternalMediaReceiver};
 use crate::utils::rtp::ParsedRtpPacket;
@@ -28,6 +28,12 @@ use crate::sctp::message::DataChannelType;
 use std::task::Waker;
 use std::io::Error;
 use rtp_rs::RtpReaderError;
+use slog::{
+    slog_trace,
+    slog_debug,
+    slog_info,
+    slog_warn
+};
 
 /// The default setup type if the remote peer offers active and passive setup
 /// Allowed values are only `RTPTransportSetup::Passive` and `RTPTransportSetup::Active`
@@ -94,6 +100,8 @@ pub enum SignallingState {
 pub struct PeerConnection {
     state: PeerConnectionState,
     signalling_state: SignallingState,
+
+    logger: slog::Logger,
 
     peer_poll_waker: Option<Waker>,
 
@@ -162,8 +170,11 @@ macro_rules! get_attribute_value {
 }
 
 impl PeerConnection {
-    pub fn new(event_loop: MainContext) -> Self {
+    pub fn new(event_loop: MainContext, logger: slog::Logger) -> Self {
+        let logger_clone = logger.clone();
         let mut connection = PeerConnection{
+            logger,
+
             state: PeerConnectionState::New,
             signalling_state: SignallingState::None,
 
@@ -189,7 +200,10 @@ impl PeerConnection {
             dispatch_undecodable_packets: true,
         };
 
-        connection.ice_agent.get_ffi_agent().on_selected_pair(|_, _, _, _| println!("Candidate pair has been found")).unwrap();
+        connection.ice_agent.get_ffi_agent().on_selected_pair(move |stream_id, component_id, local_candidate, remote_candidate| {
+            slog_debug!(logger_clone, "Changed candidate pair for stream {} (Component: {}). Local candidate: {}. Remote candidate: {}",
+                stream_id, component_id, local_candidate.to_sdp().to_string(), remote_candidate.to_sdp().to_string());
+        }).unwrap();
         //connection.ice_agent.get_ffi_agent().set_nice_property(NiceAgentProperty::StunServer(Some(String::from("74.125.143.127"))));//stun.l.google.com
         //connection.ice_agent.get_ffi_agent().set_nice_property(NiceAgentProperty::StunPort(19302));
 
@@ -421,7 +435,7 @@ impl PeerConnection {
                 continue;
             }
 
-            println!("RTP Stream got new {} on sdp index {:?}", receiver_id, media_line.sdp_index());
+            slog_info!(self.logger, "RTP Stream got new {stream} on sdp index {index:?}", stream = receiver_id, index = media_line.sdp_index());
             let (tx, rx) = mpsc::unbounded_channel();
 
             let (ctx, crx) = mpsc::unbounded_channel();
@@ -676,13 +690,14 @@ impl PeerConnection {
     }
 
     fn create_transport(&mut self, owning_media_line: u32) -> Result<Rc<RefCell<RTCTransport>>, RTCTransportInitializeError> {
-        println!("Creating a new transport channel");
+        slog_debug!(self.logger, "Creating a new transport channel (Owner: {})", owning_media_line);
+
         /* register a new channel */
         let stream = libnice::ice::Agent::stream_builder(&mut self.ice_agent, 1).build()
             .map_err(|error| RTCTransportInitializeError::IceStreamAllocationFailed { error })?;
 
         #[allow(unused_mut)]
-        let mut connection = RTCTransport::new(stream, owning_media_line)?;
+        let mut connection = RTCTransport::new(stream, owning_media_line, &self.logger)?;
 
         /* FIXME! */
         #[cfg(feature = "simulated-loss")]
@@ -722,7 +737,8 @@ impl PeerConnection {
             },
             RTCTransportEvent::TransportStateChanged => {
                 /* TODO: Improve state change handling. This specially applies to transport failures */
-                println!("Transport state change to {:?}", ice.state());
+                slog_debug!(self.logger, "Transport channel {} changed its state to {:?}", ice.transport_id, ice.state());
+
                 match ice.state() {
                     &RTCTransportState::Connected => {
                         if let Some(channel) = &mut self.application_channel {
@@ -866,7 +882,7 @@ impl PeerConnection {
                     Ok(reader) => {
                         if let Some(receiver) = self.stream_receiver.get_mut(&reader.ssrc()) {
                             if receiver.track().transport_id != ice.transport_id {
-                                eprintln!("Received RTP message for receiver, but receiver isn't registered to that transport");
+                                slog_warn!(self.logger, "Received RTP message for receiver, but receiver isn't registered to that transport. Expected {}, Received: {}", receiver.track().transport_id, ice.transport_id);
                             } else {
                                 receiver.handle_rtp_packet(reader);
                             }
@@ -883,7 +899,7 @@ impl PeerConnection {
             },
             RTCTransportEvent::MessageDropped(message) => {
                 /* This is for internal debug only */
-                println!("Dropping received ICE message of length {}", message.len());
+                slog_trace!(self.logger, "Dropping received ICE message of length {}", message.len());
             },
             _ => {
                 /* XXX: Explicitly handle all events? */
@@ -899,7 +915,7 @@ impl PeerConnection {
 
         for (id, rc) in removed {
             self.stream_receiver.insert(id, rc.into_void());
-            println!("Media stream {} receiver has no end point. Voiding it.", id);
+            slog_debug!(self.logger, "Media stream {} receiver has no end point. Voiding it.", id);
         }
     }
 

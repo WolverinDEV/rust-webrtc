@@ -31,6 +31,7 @@ use webrtc_lib::rtc::{PeerConnection, PeerConnectionEvent, RtcDescriptionType};
 use webrtc_lib::utils::rtcp::packets::{RtcpPayloadFeedback, RtcpPacketPayloadFeedback};
 use webrtc_lib::utils::rtcp::RtcpPacket;
 use webrtc_lib::{initialize_webrtc, rtc};
+use slog::{ o, Drain };
 
 mod shared;
 mod video;
@@ -74,9 +75,14 @@ impl Default for ClientData {
     fn default() -> Self {
         let event_loop = MAIN_GIO_EVENT_LOOP.lock().unwrap().event_loop();
         let event_context = event_loop.get_context();
+
+        let decorator = slog_term::PlainSyncDecorator::new(std::io::stdout());
+        let drain = slog_term::FullFormat::new(decorator).build().fuse();
+        let logger = slog::Logger::root(drain, o!());
+
         ClientData {
             client_id: 0,
-            peer: PeerConnection::new(event_context),
+            peer: PeerConnection::new(event_context, logger),
             peer_abort: None,
 
             media_broadcast_abort: None,
