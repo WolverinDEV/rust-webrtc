@@ -5,6 +5,7 @@ use core::{mem};
 use std::os::raw::{c_void, c_int, c_ulong};
 use openssl::srtp::SrtpProfileId;
 use openssl::error::ErrorStack;
+use crate::global_logger;
 
 /* SRTP stuff (http://tools.ietf.org/html/rfc3711) */
 /* cipher_key_length: 128 bits / 16 bytes, cipher_salt_length: 112 bits / 14 bytes */
@@ -315,6 +316,6 @@ impl Srtp2 {
 impl Drop for Srtp2 {
     fn drop(&mut self) {
         let _ = Srtp2ErrorCode::from(unsafe { ffi::srtp_dealloc(self.state) }).success()
-            .map_err(|error| eprintln!("failed to deallocate srtp in state: {:?}", error));
+            .map_err(|error| slog::slog_error!(global_logger(), "failed to deallocate srtp in state: {:?}", error));
     }
 }

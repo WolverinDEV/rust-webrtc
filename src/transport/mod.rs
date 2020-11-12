@@ -39,7 +39,6 @@ use slog::{
     o,
     slog_trace,
     slog_debug,
-    slog_info,
     slog_error
 };
 
@@ -206,7 +205,6 @@ pub struct RTCTransport {
     #[cfg(feature = "simulated-loss")]
     simulated_loss: u8,
 
-    last_ice_state: ComponentState,
     ice_stream: Option<libnice::ice::Stream>,
     local_candidates: Vec<Box<Candidate>>,
 
@@ -337,7 +335,6 @@ impl RTCTransport {
             //private_key,
 
             setup: RTPTransportSetup::Unset,
-            last_ice_state: ComponentState::Disconnected,
             local_candidates: Vec::with_capacity(16),
 
             control_receiver: crx,
@@ -570,6 +567,7 @@ impl RTCTransport {
                     }
                 }
 
+                slog_debug!(self.logger, "DTLS handshake succeeded. Transport initialized.");
                 self.dtls = Some(DTLSState::Connected(stream));
                 self.update_state();
                 self.pending_events.pop_front()
@@ -661,7 +659,8 @@ impl RTCTransport {
         }
 
         let state = {
-            match self.last_ice_state {
+            let component = &mut self.ice_stream.as_mut().expect("missing ice stream").mut_components()[0];
+            match component.get_state() {
                 ComponentState::Ready |
                 ComponentState::Connected => {
                     if let Some(DTLSState::Connected(..)) = &self.dtls {
@@ -718,23 +717,26 @@ impl Stream for RTCTransport {
         let ice_state: ComponentState;
         {
             let component = &mut self.ice_stream.as_mut().expect("missing ice stream").mut_components()[0];
-            while let Poll::Ready(_) = component.poll_state(cx) {
-                self.failure_tear_down(RTCTransportFailReason::IceFinished);
-                return Poll::Ready(Some(RTCTransportEvent::TransportStateChanged));
+            match component.poll_state(cx) {
+                Poll::Ready(Some(old_state)) => {
+                    ice_state = component.get_state();
+                    slog_trace!(self.logger, "ICE stream changed the state from {:?} to {:?}", old_state, ice_state);
+                    return if ice_state == ComponentState::Failed {
+                        self.failure_tear_down(RTCTransportFailReason::IceFailure);
+                        Poll::Ready(Some(RTCTransportEvent::TransportStateChanged))
+                    } else {
+                        self.update_state();
+                        Poll::Ready(Some(RTCTransportEvent::IceStateChanged(ice_state)))
+                    }
+                },
+                Poll::Ready(None) => {
+                    self.failure_tear_down(RTCTransportFailReason::IceFinished);
+                    return Poll::Ready(Some(RTCTransportEvent::TransportStateChanged));
+                },
+                Poll::Pending => {}
             }
 
             ice_state = component.get_state();
-            if ice_state != self.last_ice_state {
-                slog_trace!(self.logger, "ICE stream changed the state from {:?} to {:?}", self.last_ice_state, ice_state);
-                self.last_ice_state = ice_state;
-                if ice_state == ComponentState::Failed {
-                    self.failure_tear_down(RTCTransportFailReason::IceFailure);
-                    return Poll::Ready(Some(RTCTransportEvent::TransportStateChanged));
-                } else {
-                    self.update_state();
-                    return Poll::Ready(Some(RTCTransportEvent::IceStateChanged(ice_state)));
-                }
-            }
         }
 
         while let Poll::Ready(data) = { self.ice_stream.as_mut().expect("missing ice stream").mut_components()[0].poll_next_unpin(cx) } {
@@ -750,7 +752,7 @@ impl Stream for RTCTransport {
 
         match self.dtls.as_mut().expect("missing dtls state") {
             DTLSState::Uninitialized(_) => {
-                if self.last_ice_state == ComponentState::Ready {
+                if matches!(ice_state, ComponentState::Connected | ComponentState::Ready) {
                     if let DTLSState::Uninitialized(ssl) = self.dtls.take().unwrap() {
                         /* lets start handshaking */
                         let mut stream_builder = ssl::SslStreamBuilder::new(ssl, DtlsStream{ source: self.dtls_buffer.clone() });
@@ -768,6 +770,7 @@ impl Stream for RTCTransport {
                         };
 
                         /* process_dtls_handshake_result must set the DTLS state again! */
+                        slog_debug!(self.logger, "Beginning DTLS handshake");
                         if let Some(event) = self.process_dtls_handshake_result(result) {
                             assert!(self.dtls.is_some());
                             return Poll::Ready(Some(event));

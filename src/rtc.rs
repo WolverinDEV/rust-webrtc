@@ -16,7 +16,7 @@ use webrtc_sdp::{SdpSession, SdpOrigin, SdpTiming};
 use webrtc_sdp::address::ExplicitlyTypedAddress;
 use std::net::{IpAddr, Ipv4Addr};
 use libnice::ffi::{NiceCompatibility, NiceAgentProperty};
-use libnice::sys::{NiceAgentOption_NICE_AGENT_OPTION_ICE_TRICKLE, NiceCandidate};
+use libnice::sys::{NiceAgentOption_NICE_AGENT_OPTION_ICE_TRICKLE};
 use crate::application::{ChannelApplication, DataChannel, ApplicationChannelEvent};
 use crate::media::{MediaLine, MediaLineParseError, ActiveInternalMediaReceiver, MediaReceiver, InternalMediaSender, InternalMediaTrack, MediaSender, NegotiationState, InternalMediaReceiver};
 use crate::utils::rtp::ParsedRtpPacket;
@@ -32,7 +32,8 @@ use slog::{
     slog_trace,
     slog_debug,
     slog_info,
-    slog_warn
+    slog_warn,
+    o
 };
 
 /// The default setup type if the remote peer offers active and passive setup
@@ -228,7 +229,7 @@ impl PeerConnection {
     /// If create_media_line is not set, transport must point to a valid transport!
     fn application_channel(&mut self, create_media_line: bool, mut transport: Option<u32>) -> &mut Option<Box<ChannelApplication>> {
         if !self.application_channel.is_some() && (transport.is_some() || create_media_line) {
-            let mut channel = Box::new(ChannelApplication::new().expect("failed to allocate new application channel"));
+            let mut channel = Box::new(ChannelApplication::new(self.logger.new(o!())).expect("failed to allocate new application channel"));
             if create_media_line && self.media_lines.iter().find(|line| RefCell::borrow(line).media_type == SdpMediaValue::Application).is_none() {
                 let media_line = self.allocate_media_line(SdpMediaValue::Application);
                 transport = Some(RefCell::borrow(&media_line).transport_id);
@@ -441,6 +442,7 @@ impl PeerConnection {
             let (ctx, crx) = mpsc::unbounded_channel();
             let mut internal_receiver = ActiveInternalMediaReceiver {
                 track: InternalMediaTrack {
+                    logger: self.logger.new(o!("id" => *receiver_id)),
                     id: *receiver_id,
                     media_line: media_line.unique_id(),
 
@@ -640,6 +642,7 @@ impl PeerConnection {
         let mut transport = RefCell::borrow_mut(self.transport.get(&media_line.transport_id).expect("missing transport"));
         let (internal_sender, sender) = InternalMediaSender::new(
             InternalMediaTrack {
+                logger: self.logger.new(o!("id" => ssrc)),
                 id: ssrc,
                 media_line: media_line.unique_id(),
 
@@ -915,7 +918,7 @@ impl PeerConnection {
 
         for (id, rc) in removed {
             self.stream_receiver.insert(id, rc.into_void());
-            slog_debug!(self.logger, "Media stream {} receiver has no end point. Voiding it.", id);
+            slog_debug!(self.logger, "Media receiver for channel {} has been closed. Using void receiver.", id);
         }
     }
 

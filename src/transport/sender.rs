@@ -7,6 +7,8 @@ use futures::{Future, FutureExt};
 use futures::task::{Context, Poll};
 use tokio::macros::support::Pin;
 use crate::transport::packet_history::RtpPacketHistory;
+use slog::{ slog_error };
+use crate::global_logger;
 
 const SRTP_ADDITIONAL_HEADER_SIZE: usize = 148;
 
@@ -119,7 +121,8 @@ impl RtpSender {
             },
             Err(PacketProtectError::BackendMissing) => { /* seems like we're not yet/anymore connected to anything */ }
             Err(error) => {
-                eprintln!("Failed to protect RTP packet: {:?}", error);
+                /* TODO: Move away from global logger */
+                slog_error!(global_logger(), "Failed to protect RTP packet: {:?}", error);
             }
         }
     }
@@ -161,7 +164,8 @@ impl RtcpSender {
                 self.encrypt_and_send(&mut buffer, length);
             },
             Err(error) => {
-                eprintln!("Failed to create RtcpPacket: {}", error);
+                /* TODO: Move away from global logger */
+                slog_error!(global_logger(), "Failed to create RtcpPacket: {}", error);
             }
         }
     }
@@ -173,7 +177,8 @@ impl RtcpSender {
             },
             Err(PacketProtectError::BackendMissing) => { /* seems like we're not yet/anymore connected to anything */ }
             Err(error) => {
-                eprintln!("Failed to protect RTCP packet: {:?}", error);
+                /* TODO: Move away from global logger */
+                slog_error!(global_logger(), "Failed to protect RTCP packet: {:?}", error);
             }
         }
     }

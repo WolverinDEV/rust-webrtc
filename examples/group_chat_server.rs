@@ -78,7 +78,8 @@ impl Default for ClientData {
 
         let decorator = slog_term::PlainSyncDecorator::new(std::io::stdout());
         let drain = slog_term::FullFormat::new(decorator).build().fuse();
-        let logger = slog::Logger::root(drain, o!());
+        /* FIXME: Generate a client id */
+        let logger = slog::Logger::root(drain, o!("client-id" => 0));
 
         ClientData {
             client_id: 0,
@@ -295,7 +296,10 @@ fn broadcast_client_media(client: Arc<Mutex<Client<ClientData>>>, locked_client:
 }
 
 fn main() {
-    initialize_webrtc();
+    let decorator = slog_term::PlainSyncDecorator::new(std::io::stdout());
+    let drain = slog_term::FullFormat::new(decorator).build().fuse();
+    let logger = slog::Logger::root(drain, o!("global-logger" => 1));
+    initialize_webrtc(logger);
 
     execute_example(execute_client);
 }

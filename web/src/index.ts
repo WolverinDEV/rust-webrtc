@@ -286,7 +286,7 @@ async function initializePeer() {
         await initializePeerAudio(peer);
     }
 
-    const kEnableVideo = false;
+    const kEnableVideo = true;
     if(kEnableVideo) {
         await initializePeerVideo(peer);
     }

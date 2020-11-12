@@ -178,8 +178,6 @@ impl MediaLine {
             .map(|e| if let SdpAttribute::Extmap(data) = e { data.clone() } else { panic!() })
             .collect();
 
-        println!("Remote codecs: {:?}", result.remote_codecs);
-        println!("Remote streams: {:?}", result.remote_streams);
         Ok(result)
     }
 

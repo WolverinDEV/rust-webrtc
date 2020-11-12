@@ -30,6 +30,8 @@ pub enum ControlDataSendError {
 
 #[derive(Debug)]
 pub(crate) struct InternalMediaTrack {
+    pub logger: slog::Logger,
+
     pub id: u32,
     /// Owning unique media line id
     pub media_line: u32,

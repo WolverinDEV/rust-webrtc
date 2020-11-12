@@ -13,6 +13,7 @@ use std::ops::Deref;
 use webrtc_sdp::media_type::SdpMedia;
 use rtp_rs::Seq;
 use std::future::Future;
+use slog::slog_trace;
 
 #[derive(Debug)]
 pub enum MediaSenderEvent {
@@ -321,7 +322,8 @@ impl Future for InternalMediaSender {
 
         while let Poll::Ready(message) = self.control.poll_next_unpin(cx) {
             if message.is_none() {
-                println!("Media sender channel closed");
+                slog_trace!(self.track.logger, "Media sender has been closed (dropped)");
+
                 let packet = RtcpPacket::Bye(RtcpPacketBye{
                     reason: None,
                     src: vec![self.track.id]

@@ -21,6 +21,7 @@ use futures::io::ErrorKind;
 use crate::sctp::notification::{SctpNotificationType, SctpNotification, SctpNotificationStreamReset, SctpNotificationAssocChange, SctpSacState};
 use crate::sctp::message::{DataChannelMessage as RawDataChannelMessage, DataChannelType, DataChannelControlMessage, DataChannelControlMessageOpenAck, DataChannelControlMessageOpen};
 use crate::sctp::sctp_macros::{SCTP_ALL_ASSOC, SCTP_STREAM_RESET_DENIED, SCTP_STREAM_RESET_FAILED, SCTP_STREAM_RESET_INCOMING_SSN, SPP_PMTUD_ENABLE, SPP_PMTUD_DISABLE, SCTP_EOR, SCTP_UNORDERED};
+use slog::{ slog_trace, slog_error, o };
 
 /// Events which are emitted by the `ApplicationChannel`.
 pub enum ApplicationChannelEvent {
@@ -53,6 +54,7 @@ struct InternalDataChannel {
 
 /// The implementation for the application media channel aka Data Channels
 pub(crate) struct ChannelApplication {
+    logger: slog::Logger,
     state: ApplicationChannelState,
 
     max_incoming_channel: u16, /* Don't modify once initialized */
@@ -78,7 +80,7 @@ pub(crate) struct ChannelApplication {
 }
 
 impl ChannelApplication {
-    pub fn new() -> Option<Self> {
+    pub fn new(logger: slog::Logger) -> Option<Self> {
         let stream = Rc::new(RefCell::new(SctpStreamInner {
             read_queue: VecDeque::new(),
             read_index: 0,
@@ -90,10 +92,11 @@ impl ChannelApplication {
         if sctp_session.is_none() { return None; }
 
         let _ = sctp_session.as_mut().unwrap().set_linger(0)
-            .map_err(|err| eprintln!("failed to disable linger: {}", err));
+            .map_err(|err| slog_error!(logger, "failed to disable linger: {}", err));
 
         let (tx, rx) = mpsc::unbounded_channel();
         Some(ChannelApplication {
+            logger,
             state: ApplicationChannelState::Disconnected,
 
             max_incoming_channel: 1024,
@@ -150,7 +153,6 @@ impl ChannelApplication {
         if self.state == ApplicationChannelState::Connected {
             internal_channel.state = DataChannelState::Connecting;
             self.send_open_request(&internal_channel);
-            self.send_message(&internal_channel, &RawDataChannelMessage::String(String::from("HEY!")), false);
         }
 
         let channel = DataChannel {
@@ -209,7 +211,8 @@ impl ChannelApplication {
                         let _ = channel.event_sender.send(event);
                     }
                 } else {
-                    eprintln!("Received SCTP message for invalid channel {}.", channel_id);
+                    /* TODO: Add option to disable this message. Could cause a lot of spam if the remote peer is evil */
+                    slog_trace!(self.logger, "Received SCTP message for invalid channel {}.", channel_id);
                 }
                 None
             }
@@ -229,7 +232,7 @@ impl ChannelApplication {
                  */
                 if (internal_channel_id & 1) == if self.dtls_role_client { 0 } else { 1 } {
                     /* Error handling described in https://tools.ietf.org/html/draft-ietf-rtcweb-data-protocol-08#section-6 */
-                    eprintln!("Remote peer tried to open a data channel on an invalid stream id");
+                    slog_trace!(self.logger, "Remote peer tried to open a data channel on an invalid stream id. Id: {}", internal_channel_id);
                     self.pending_stream_resets.push(internal_channel_id);
                     self.send_outgoing_stream_resets();
                     return None;
@@ -237,7 +240,7 @@ impl ChannelApplication {
 
                 if self.internal_channels.contains_key(&internal_channel_id) {
                     /* Error handling described in https://tools.ietf.org/html/draft-ietf-rtcweb-data-protocol-08#section-6 */
-                    println!("Remote peer tried to open a data channel on a stream which already contains a channel. Closing data channel.");
+                    slog_trace!(self.logger, "Remote peer tried to open a data channel on a stream which already contains a channel. Closing data channel.");
                     let channel = self.internal_channels.get(&internal_channel_id).unwrap().clone();
                     let mut channel = RefCell::borrow_mut(&channel);
                     self.close_datachannel_locally(channel.deref_mut());
@@ -245,6 +248,13 @@ impl ChannelApplication {
                 }
 
                 let channel_id = self.channel_id_index;
+                slog_trace!(self.logger, "Remote peer opened a new channel"; o!(
+                    "internal_channel_id" => internal_channel_id,
+                    "channel_id" => channel_id,
+                    "label" => &request.label,
+                    "protocol" => &request.protocol,
+                    "type" => format!("{:?}", request.channel_type)
+                ));
 
                 let (tx, rx) = mpsc::unbounded_channel();
                 let internal_channel = InternalDataChannel {
@@ -287,16 +297,23 @@ impl ChannelApplication {
                     let mut channel = RefCell::borrow_mut(channel);
                     if channel.state != DataChannelState::Connecting {
                         if !matches!(channel.state, DataChannelState::Closed | DataChannelState::Closing) {
-                            eprintln!("Received OpenAck for channel which isn't in connection state any more");
+                            slog_trace!(self.logger, "Received OpenAck for channel which isn't in connection state any more"; o!(
+                                "internal_channel_id" => internal_channel_id,
+                                "channel_id" => channel.channel_id
+                            ));
                         } else {
                             /* its fine, we've already closed it */
                         }
                     } else {
+                        slog_trace!(self.logger, "Received OpenAck for channel"; o!(
+                            "internal_channel_id" => internal_channel_id,
+                            "channel_id" => channel.channel_id
+                        ));
                         channel.state = DataChannelState::Open;
                         let _ = channel.event_sender.send(DataChannelEvent::StateChanged(DataChannelState::Open));
                     }
                 } else {
-                    eprintln!("Received OpenAck for unknown channel {:?}", internal_channel_id);
+                    slog_trace!(self.logger, "Received OpenAck for unknown channel"; "internal_channel_id" => internal_channel_id)
                 }
             }
         }
@@ -308,7 +325,7 @@ impl ChannelApplication {
             SctpNotification::StreamReset(event) => self.process_sctp_notification_stream_reset(event),
             SctpNotification::AssocChange(event) => self.process_sctp_notification_assoc_change(event),
             _ => {
-                println!("Received unexpected SCTP notification: {:?}", notification);
+                slog_error!(self.logger, "Received unexpected SCTP notification: {:?}", notification);
                 None
             }
         }
@@ -330,9 +347,10 @@ impl ChannelApplication {
                         DataChannelState::Closed => {}
                     }
                 } else {
-                    println!("Received remote stream reset notification for an invalid channel");
+                    slog_error!(self.logger, "Received remote stream reset notification for an invalid channel");
                 }
 
+                slog_trace!(self.logger, "Closing internal channel (stream reset)"; "internal_channel_id" => channel_id);
                 self.internal_channels.remove(channel_id);
             }
         }
@@ -342,7 +360,7 @@ impl ChannelApplication {
     }
 
     fn process_sctp_notification_assoc_change(&mut self, notification: &SctpNotificationAssocChange) -> Option<ApplicationChannelEvent> {
-        println!("Assoc change: {:?}", notification);
+        slog_trace!(self.logger, "Assoc change: {:?}", notification);
         match notification.state {
             SctpSacState::CommUp => {
                 self.state = ApplicationChannelState::Connected;
@@ -374,6 +392,7 @@ impl ChannelApplication {
         channel.state = DataChannelState::Closing;
         let _ = channel.event_sender.send(DataChannelEvent::StateChanged(DataChannelState::Closing));
 
+        slog_trace!(self.logger, "Closing data channel"; "channel_id" => channel.channel_id, "internal_channel_id" => channel.internal_channel_id);
         self.pending_stream_resets.push(channel.internal_channel_id);
         self.send_outgoing_stream_resets();
     }
@@ -404,8 +423,8 @@ impl ChannelApplication {
         };
 
         if let Err(error) = result {
-            /* TODO: Improve error handling */
-            println!("failed to send sctp message: {:?}", error);
+            slog_error!(self.logger, "Failed to send sctp message: {:?}", error);
+            /* TODO: Improve error handling. Can this even happen? */
         }
     }
 
@@ -414,7 +433,7 @@ impl ChannelApplication {
 
         let result = self.sctp_session.reset_streams(self.pending_stream_resets.as_slice());
         if let Err(error) = result {
-            println!("Reset result: {}", error);
+            slog_trace!(self.logger, "Pending outgoing stream reset resulted in {}. Trying again later.", error);
         } else {
             self.pending_stream_resets.clear();
         }
@@ -423,8 +442,6 @@ impl ChannelApplication {
 
 impl ChannelApplication {
     pub fn set_remote_description(&mut self, media: &SdpMedia) -> Result<(), String> {
-        println!("Configuring application channel");
-
         let dtls_role_client = match media.get_attribute(SdpAttributeType::Setup) {
             Some(SdpAttribute::Setup(SdpAttributeSetup::Active)) => Ok(false),
             Some(SdpAttribute::Setup(SdpAttributeSetup::Passive)) => Ok(true),
@@ -514,7 +531,7 @@ impl ChannelApplication {
 
     pub fn handle_data(&mut self, message: Vec<u8>) {
         if self.transport.is_none() {
-            eprintln!("Received DTLS data for SCTP without having a transport.");
+            slog_error!(self.logger, "Received DTLS data for SCTP without having a transport.");
             return;
         }
         let mut sctp_buffer = RefCell::borrow_mut(&self.stream);
@@ -541,7 +558,8 @@ impl Stream for ChannelApplication {
                                 }
                             },
                             Err(error) => {
-                                println!("Failed to parse SCTP message: {:?}", error);
+                                /* TODO: Prevent error spam? */
+                                slog_error!(self.logger, "Failed to parse SCTP message: {:?}", error);
                             }
                         }
                     },
@@ -561,7 +579,7 @@ impl Stream for ChannelApplication {
             if let Some(ice_control) = &self.transport {
                 let _ = ice_control.send(RTCTransportControl::SendMessage(buffer));
             } else {
-                eprintln!("Tried to send SCTP packet without having a valid ice connection");
+                slog_error!(self.logger, "Tried to send SCTP packet without having a valid ice connection.");
             }
         }
 
@@ -572,7 +590,7 @@ impl Stream for ChannelApplication {
                         let internal_channel = internal_channel.clone();
                         self.send_message(RefCell::borrow(&internal_channel).deref(), &message, false);
                     } else {
-                        println!("Data channel tried to send a message to an unknown channel.");
+                        slog_error!(self.logger, "Data channel tried to send a message to an unknown channel"; "channel_id" => channel);
                     }
                 },
                 DataChannelAction::Close(channel) => {

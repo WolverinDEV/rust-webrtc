@@ -112,7 +112,7 @@ dependencies = [
 [[package]]
 name = "build-utils"
 version = "0.1.0"
-source = "git+https://github.com/WolverinDEV/build-utils.git#6dfd8fe370cd0b1566b76262db7e7f9057d34e19"
+source = "git+https://github.com/WolverinDEV/build-utils.git#7f12f762cb1b6503e5635e5f77aff92269a55298"
 dependencies = [
  "base64 0.13.0",
  "lazy_static",
@@ -631,7 +631,7 @@ dependencies = [
 [[package]]
 name = "libusrsctp-sys"
 version = "0.1.0"
-source = "git+https://github.com/WolverinDEV/rust-usrsctp-sys.git#13b17656e13d136221b8cb9c397ad309deb232b7"
+source = "git+https://github.com/WolverinDEV/rust-usrsctp-sys.git#73ba64d54acaaced1c33711b693a50bfb2649394"
 dependencies = [
  "bindgen",
  "build-utils",

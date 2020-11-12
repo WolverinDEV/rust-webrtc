@@ -15,6 +15,8 @@ use libc;
 use crate::sctp::notification::{SctpNotificationType, SctpNotification};
 use crate::sctp::sctp_macros::{SCTP_EVENT, IPPROTO_SCTP, SCTP_ALL_ASSOC, SCTP_PEER_ADDR_PARAMS, SCTP_SENDV_SNDINFO, MSG_NOTIFICATION, AF_CONN, SOCK_STREAM, SCTP_ENABLE_STREAM_RESET, SCTP_NODELAY, SCTP_INITMSG, SCTP_STREAM_RESET_OUTGOING, SCTP_RESET_STREAMS, SCTP_DATA_LAST_FRAG};
 use std::{ptr, panic};
+use crate::{global_logger};
+use slog::{ slog_crit, slog_error };
 
 pub mod notification;
 pub mod message;
@@ -220,7 +222,7 @@ unsafe extern "C" fn usrsctp_write_callback(
     });
 
     if result.is_err() {
-        eprintln!("usrsctp_write_callback(..) catch_unwind received: {:?}", result.unwrap_err());
+        slog_crit!(global_logger(), "usrsctp_write_callback(..) catch_unwind received: {:?}", result.unwrap_err());
         std::process::abort();
     }
 
@@ -240,7 +242,7 @@ unsafe extern "C" fn usrsctp_read_callback(
         let socket = SCTP_INSTANCE.lock().unwrap().find_address(ulp_info as u32);
         if let Some(socket) = socket {
             if data.is_null() {
-                println!("usrsctp_read_callback with nullptr as sata. This should not happen!");
+                slog_error!(global_logger(), "usrsctp_read_callback with nullptr as sata. This should not happen!");
             } else {
                 let buffer = ptr::slice_from_raw_parts_mut(data as *mut u8, datalen).as_mut().unwrap();
                 socket.callback_read(buffer, recv_info, flags);
@@ -258,8 +260,7 @@ unsafe extern "C" fn usrsctp_read_callback(
     });
 
     if result.is_err() {
-
-        eprintln!("usrsctp_read_callback(..) catch_unwind received: {:?}", result.unwrap_err());
+        slog_crit!(global_logger(), "usrsctp_read_callback(..) catch_unwind received: {:?}", result.unwrap_err());
         std::process::abort();
     }
 
@@ -529,7 +530,8 @@ impl<T: Read + Write + Unpin> Stream for UsrSctpSession<T> {
                             match SctpNotification::parse(&buffer) {
                                 Ok(notification) => return Poll::Ready(Some(UsrSctpSessionEvent::EventReceived { notification })),
                                 Err(error) => {
-                                    eprintln!("Failed to parse SCTP notification: {}", error);
+                                    /* TODO: Move this away from the global logger */
+                                    slog_error!(global_logger(), "Failed to parse SCTP notification: {}", error);
                                 }
                             }
                         } else {
@@ -560,7 +562,8 @@ impl<T: Read + Write + Unpin> Stream for UsrSctpSession<T> {
                         break;
                     } else {
                         /* TODO better handling, maybe pip through */
-                        println!("Having some critical underlying IO error!");
+                        /* TODO: Move this away from global logging! */
+                        slog_error!(global_logger(), "Having some critical underlying IO error!");
                         break;
                     }
                 }

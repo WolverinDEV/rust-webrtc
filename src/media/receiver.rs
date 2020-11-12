@@ -11,7 +11,7 @@ use crate::media::{InternalMediaTrack, ControlDataSendError};
 use webrtc_sdp::media_type::SdpMedia;
 use std::collections::HashMap;
 use std::collections::hash_map::RandomState;
-
+use slog::slog_trace;
 /* Note: When looking at extensions https://github.com/zxcpoiu/webrtc/blob/ea3dddf1d0880e89d84a7e502f65c65993d4169d/modules/rtp_rtcp/source/rtp_packet_received.cc#L50 */
 
 #[derive(Debug)]
@@ -241,11 +241,11 @@ impl Future for ActiveInternalMediaReceiver {
                         feedback: RtcpTransportFeedback::create_generic_nack(packets.as_slice())
                     };
 
-                    println!("Resending packets on {} {:?} -> {:?}", self.track.id, packets, &feedback);
+                    slog_trace!(self.track.logger, "Resending packets on {} {:?} -> {:?}", self.track.id, packets, &feedback);
                     self.rtcp_sender.send(&RtcpPacket::TransportFeedback(feedback));
                 },
                 _ => {
-                    println!("InternalMediaReceiver::RtpPacketResendRequesterEvent {:?}", event);
+                    slog_trace!(self.track.logger, "InternalMediaReceiver::RtpPacketResendRequesterEvent {:?}", event);
                 }
             }
         }
