@@ -675,6 +675,8 @@ impl PeerConnection {
         );
 
         media_line.local_streams.push(internal_sender.track.id);
+        internal_sender.shared_data.lock().unwrap().remote_codecs = Some(media_line.remote_codecs.clone());
+
         self.stream_sender.insert(internal_sender.track.id, RefCell::new(internal_sender));
 
         if let Some(waker) = &self.peer_poll_waker {
