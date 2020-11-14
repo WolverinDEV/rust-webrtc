@@ -196,6 +196,22 @@ impl MediaLine {
             }
         }
 
+        if let SdpFormatList::Integers(formats) = media.get_formats() {
+            /* FIXME: Test if codec change is just narrowing/initial setup */
+            self.remote_codecs.clear();
+            self.remote_codecs.reserve(formats.len());
+            for format in formats.iter() {
+                let codec = Codec::from_sdp(*format as u8, media);
+                if codec.is_none() {
+                    return Err(MediaLineParseError::MissingCodecDescription(*format));
+                }
+
+                result.remote_codecs.push(codec.unwrap());
+            }
+        } else {
+            return Err(MediaLineParseError::InvalidFormatList);
+        }
+
         Ok(())
     }
 

@@ -480,7 +480,7 @@ impl PeerConnection {
                 let mut shared_data = sender.shared_data.lock().unwrap();
 
                 if let Some(_current_codecs) = &shared_data.remote_codecs {
-                    /* TODO: Test for changes. If codecs have been added -> fail; If codecs have been removed -> event & update */
+                    /* TODO: Test for changed (The media line already validates the codec change previously) */
                     shared_data.remote_codecs = Some(media_line.remote_codecs.clone());
                     let _ = sender.events.send(MediaSenderEvent::RemoteCodecsUpdated);
                 } else {
