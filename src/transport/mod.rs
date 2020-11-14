@@ -299,6 +299,7 @@ impl RTCTransport {
         assert_eq!(stream.components().len(), 1, "expected only one stream component");
 
 
+        /* FIXME: Move the SSL part to the generate_local_description method so any other methods creating the transport don't experience an unexpected hangup (~200ms) */
         let (fingerprint, ssl) = RTCTransport::generate_ssl_components()?;
 
         let dtls_stream = DtlsStreamSource{

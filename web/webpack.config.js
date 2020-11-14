@@ -21,6 +21,7 @@ module.exports = {
     },
     plugins: [new HtmlWebpackPlugin()],
     devServer: {
+        https: true,
         contentBase: path.join(__dirname, 'dist'),
         compress: true,
         port: 9000,

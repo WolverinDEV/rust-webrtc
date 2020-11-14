@@ -18,7 +18,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use libnice::ffi::{NiceCompatibility, NiceAgentProperty};
 use libnice::sys::{NiceAgentOption_NICE_AGENT_OPTION_ICE_TRICKLE};
 use crate::application::{ChannelApplication, DataChannel, ApplicationChannelEvent};
-use crate::media::{MediaLine, MediaLineParseError, ActiveInternalMediaReceiver, MediaReceiver, InternalMediaSender, InternalMediaTrack, MediaSender, NegotiationState, InternalMediaReceiver};
+use crate::media::{MediaLine, MediaLineParseError, ActiveInternalMediaReceiver, MediaReceiver, InternalMediaSender, InternalMediaTrack, MediaSender, NegotiationState, InternalMediaReceiver, MediaSenderEvent};
 use crate::utils::rtp::ParsedRtpPacket;
 use crate::utils::rtcp::RtcpPacket;
 use std::ops::{DerefMut};
@@ -279,6 +279,8 @@ impl PeerConnection {
     }
 
     pub fn set_remote_description(&mut self, description: &webrtc_sdp::SdpSession, mode: &RtcDescriptionType) -> Result<(), RemoteDescriptionApplyError> {
+        slog_trace!(self.logger, "Received remote session description ({:?})", mode);
+
         if mode == &RtcDescriptionType::Offer {
             if !matches!(&self.signalling_state, &SignallingState::None | &SignallingState::Negotiated) {
                 return Err(RemoteDescriptionApplyError::InvalidNegotiationState);
@@ -418,6 +420,7 @@ impl PeerConnection {
             _ => panic!()
         }
 
+        slog_trace!(self.logger, "Remote session description applied successfully");
         Ok(())
     }
 
@@ -431,8 +434,8 @@ impl PeerConnection {
         }).count();
 
         for receiver_id in media_line.remote_streams.iter() {
-            if self.stream_receiver.contains_key(&receiver_id) {
-                /* TODO: Check if codec or formats have changed */
+            if self.stream_sender.contains_key(&receiver_id) {
+                /* TODO: Check if codec or formats have changed and if so fail */
                 continue;
             }
 
@@ -470,12 +473,31 @@ impl PeerConnection {
             self.dispatch_peer_event(PeerConnectionEvent::ReceivedRemoteStream(receiver));
             self.stream_receiver.insert(*receiver_id, Box::new(internal_receiver));
         }
+
+        for sender_id in media_line.local_streams.iter() {
+            if let Some(sender) = self.stream_sender.get(sender_id) {
+                let sender = RefCell::borrow_mut(sender);
+                let mut shared_data = sender.shared_data.lock().unwrap();
+
+                if let Some(_current_codecs) = &shared_data.remote_codecs {
+                    /* TODO: Test for changes. If codecs have been added -> fail; If codecs have been removed -> event & update */
+                    shared_data.remote_codecs = Some(media_line.remote_codecs.clone());
+                    let _ = sender.events.send(MediaSenderEvent::RemoteCodecsUpdated);
+                } else {
+                    shared_data.remote_codecs = Some(media_line.remote_codecs.clone());
+                    let _ = sender.events.send(MediaSenderEvent::RemoteCodecsUpdated);
+                }
+            } else {
+                /* well that should not happen... */
+            }
+        }
     }
 
     pub fn create_local_description(&mut self) -> Result<SdpSession, CreateAnswerError> {
         if matches!(&self.signalling_state, &SignallingState::HaveLocalOffer | &SignallingState::Negotiated) {
             return Err(CreateAnswerError::InvalidNegotiationState);
         }
+        slog_trace!(self.logger, "Generating local session description (Signalling state: {:?})", self.signalling_state);
 
         let is_offer = self.signalling_state != SignallingState::HaveRemoteOffer;
         if is_offer {
@@ -593,6 +615,7 @@ impl PeerConnection {
             _ => panic!() /* this other cases should never happen, they're already caught in the first few lines */
         }
 
+        slog_trace!(self.logger, "Local session description has been generated.");
         Ok(answer)
     }
 
@@ -709,9 +732,12 @@ impl PeerConnection {
         }
 
         let id = connection.transport_id;
+        let owning_media_line = connection.owning_media_line;
+
         let connection = Rc::new(RefCell::new(connection));
         self.transport.insert(id, connection.clone());
 
+        slog_trace!(self.logger, "Transport channel {} has been created. Owner: {}", id, owning_media_line);
         Ok(connection)
     }
 

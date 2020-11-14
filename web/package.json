@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "open-simplex-noise": "^2.4.0-pre4",
+    "sdp-transform": "^2.14.0",
     "simplex-noise": "^2.4.0"
   }
 }

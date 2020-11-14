@@ -4,7 +4,7 @@ use crate::transport::{RtpSender, RtcpSender};
 use futures::{StreamExt, Stream, FutureExt};
 use std::task::Context;
 use futures::task::Poll;
-use crate::media::{InternalMediaTrack, ControlDataSendError, NegotiationState};
+use crate::media::{InternalMediaTrack, ControlDataSendError, NegotiationState, Codec};
 use crate::utils::rtcp::packets::{RtcpTransportFeedback, RtcpPayloadFeedback, RtcpFeedbackGenericNACK, RtcpPacketBye, RtcpPacketExtendedReport};
 use tokio::macros::support::Pin;
 use std::collections::HashMap;
@@ -22,7 +22,13 @@ pub enum MediaSenderEvent {
     ReceiverReportReceived(RtcpReportBlock),
     TransportFeedbackReceived(RtcpTransportFeedback),
     PayloadFeedbackReceived(RtcpPayloadFeedback),
-    ExtendedReportReceived(RtcpPacketExtendedReport)
+    ExtendedReportReceived(RtcpPacketExtendedReport),
+
+    /// The remote supported codecs have been updated.
+    /// This could have two reasons:
+    /// 1. We initially received the remote codecs
+    /// 2. The remote has narrowed their supported codecs (Not sure if this is even allowed by WebRTC)
+    RemoteCodecsUpdated
 }
 
 pub(crate) enum MediaSenderControl {
@@ -32,15 +38,17 @@ pub(crate) enum MediaSenderControl {
     PropertiesChanged
 }
 
-struct MediaSenderProperties {
-    properties: HashMap<String, Option<String>>,
-    negotiation_state: NegotiationState
+pub(crate) struct MediaSenderSharedData {
+    pub properties: HashMap<String, Option<String>>,
+    pub remote_codecs: Option<Vec<Codec>>,
+    pub negotiation_state: NegotiationState
 }
 
-impl MediaSenderProperties {
+impl MediaSenderSharedData {
     pub fn new() -> Self {
-        MediaSenderProperties {
+        MediaSenderSharedData {
             properties: HashMap::new(),
+            remote_codecs: None,
             negotiation_state: NegotiationState::None
         }
     }
@@ -61,46 +69,54 @@ impl MediaSenderProperties {
 }
 
 pub struct MediaSender {
-    pub id: u32,
+    id: u32,
+    shared_data: Arc<Mutex<MediaSenderSharedData>>,
 
-    properties: Arc<Mutex<MediaSenderProperties>>,
-
-    payload_type: u8,
-    contributing_sources: Vec<u32>,
-
+    current_payload_type: u8,
+    current_contributing_sources: Vec<u32>,
     current_sequence_number: u16,
 
     pub(crate) events: mpsc::UnboundedReceiver<MediaSenderEvent>,
     pub(crate) control: mpsc::UnboundedSender<MediaSenderControl>
 }
 
-pub struct LockedMediaSenderProperties<'a> {
-    properties: MutexGuard<'a, MediaSenderProperties>,
-}
-
+pub struct LockedMediaSenderProperties<'a>(MutexGuard<'a, MediaSenderSharedData>);
 impl Deref for LockedMediaSenderProperties<'_> {
     type Target = HashMap<String, Option<String>>;
 
     fn deref(&self) -> &Self::Target {
-        &self.properties.properties
+        &self.0.properties
+    }
+}
+
+pub struct LockedMediaSenderRemoteCodecs<'a>(MutexGuard<'a, MediaSenderSharedData>);
+
+impl Deref for LockedMediaSenderRemoteCodecs<'_> {
+    type Target = Option<Vec<Codec>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0.remote_codecs
     }
 }
 
 impl MediaSender {
+    /// Get the [ssrc] of the sender.
+    pub fn id(&self) -> u32 { self.id }
+
     pub fn payload_type(&self) -> u8 {
-        self.payload_type
+        self.current_payload_type
     }
 
     pub fn payload_type_mut(&mut self) -> &mut u8 {
-        &mut self.payload_type
+        &mut self.current_payload_type
     }
 
     pub fn contributing_sources(&self) -> &Vec<u32> {
-        &self.contributing_sources
+        &self.current_contributing_sources
     }
 
     pub fn contributing_sources_mut(&mut self) -> &mut Vec<u32> {
-        &mut self.contributing_sources
+        &mut self.current_contributing_sources
     }
 
     pub fn current_sequence_no(&self) -> u16 {
@@ -121,9 +137,9 @@ impl MediaSender {
     pub fn send_seq(&self, data: &[u8], seq_no: u16, marked: bool, timestamp: u32, extension: Option<(u16, &[u8])>) {
         let mut packet = rtp_rs::RtpPacketBuilder::new()
             .ssrc(self.id)
-            .payload_type(self.payload_type)
+            .payload_type(self.current_payload_type)
             .marked(marked)
-            .set_csrc(self.contributing_sources.as_slice())
+            .set_csrc(self.current_contributing_sources.as_slice())
             .sequence(Seq::from(seq_no))
             .timestamp(timestamp)
             .payload(data);
@@ -151,14 +167,18 @@ impl MediaSender {
     }
 
     pub fn properties(&self) -> LockedMediaSenderProperties {
-        LockedMediaSenderProperties { properties: self.properties.lock().unwrap() }
+        LockedMediaSenderProperties(self.shared_data.lock().unwrap())
+    }
+
+    pub fn remote_codecs(&self) -> LockedMediaSenderRemoteCodecs {
+        LockedMediaSenderRemoteCodecs(self.shared_data.lock().unwrap())
     }
 
     pub fn register_property(&mut self, key: String, value: Option<String>) {
         /* you're not allowed to change the channel name */
         if key == "cname" { return; }
 
-        let mut properties = self.properties.lock().unwrap();
+        let mut properties = self.shared_data.lock().unwrap();
         if !properties.try_change(true) { return; }
 
         properties.properties.insert(key.clone(), value.clone());
@@ -167,7 +187,7 @@ impl MediaSender {
     }
 
     pub fn unset_property(&mut self, key: &String) {
-        let mut properties = self.properties.lock().unwrap();
+        let mut properties = self.shared_data.lock().unwrap();
         if !properties.try_change(false) { return; }
 
         if properties.properties.remove(key).is_some() {
@@ -189,7 +209,7 @@ impl Stream for MediaSender {
 pub(crate) struct InternalMediaSender {
     pub track: InternalMediaTrack,
 
-    properties: Arc<Mutex<MediaSenderProperties>>,
+    pub shared_data: Arc<Mutex<MediaSenderSharedData>>,
     rtp_sender: RtpSender,
     rtcp_sender: RtcpSender,
 
@@ -202,7 +222,7 @@ impl InternalMediaSender {
         let (tx, rx) = mpsc::unbounded_channel();
         let (ctx, crx) = mpsc::unbounded_channel();
 
-        let mut properties = MediaSenderProperties::new();
+        let mut properties = MediaSenderSharedData::new();
         /* A channel name is required so we add one */
         properties.properties.insert(String::from("cname"), Some(String::from(format!("{}", track.id))));
         /* we're feeling so free to add a unique media stream as well */
@@ -214,7 +234,7 @@ impl InternalMediaSender {
             track,
             events: tx,
             control: crx,
-            properties: properties.clone(),
+            shared_data: properties.clone(),
 
             rtp_sender: sender.0,
             rtcp_sender: sender.1
@@ -223,9 +243,9 @@ impl InternalMediaSender {
         let sender = MediaSender {
             control: ctx,
             events: rx,
-            properties,
-            payload_type: 0,
-            contributing_sources: vec![],
+            shared_data: properties,
+            current_payload_type: 0,
+            current_contributing_sources: vec![],
             current_sequence_number: 0,
             id: internal_sender.track.id
         };
@@ -234,14 +254,14 @@ impl InternalMediaSender {
     }
 
     pub fn negotiation_needed(&self) -> bool {
-        let properties = self.properties.lock().unwrap();
+        let properties = self.shared_data.lock().unwrap();
         matches!(&properties.negotiation_state, NegotiationState::None | NegotiationState::Changed)
     }
 
     pub fn promote_negotiation<T>(&mut self, test: T, value: NegotiationState)
         where T: Fn(NegotiationState) -> bool
     {
-        let mut properties = self.properties.lock().unwrap();
+        let mut properties = self.shared_data.lock().unwrap();
         if test(properties.negotiation_state) {
             properties.negotiation_state = value;
         }
@@ -279,7 +299,7 @@ impl InternalMediaSender {
     }
 
     pub fn write_sdp(&mut self, media: &mut SdpMedia) {
-        let properties = self.properties.lock().unwrap();
+        let properties = self.shared_data.lock().unwrap();
         InternalMediaTrack::write_sdp(&properties.properties, self.track.id, media);
     }
 

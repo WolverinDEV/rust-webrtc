@@ -1,4 +1,5 @@
 import {VirtualCamera} from "./VirtualCamera";
+import * as sdpTransform from "sdp-transform";
 
 let socket: WebSocket;
 let peer: RTCPeerConnection;
@@ -29,6 +30,17 @@ async function connect() {
 
     socket.onmessage = event => handleMessage(event.data);
     //socket.close();
+}
+
+function processOutgoingSdp(sdpString: string) : string {
+    const sdp = sdpTransform.parse(sdpString);
+
+    /* apply the "root" fingerprint to each media, FF fix */
+    if(sdp.fingerprint) {
+        sdp.media.forEach(media => media.fingerprint = sdp.fingerprint);
+    }
+
+    return sdpTransform.write(sdp);
 }
 
 type ReceivedMessage<T extends keyof WebCommand> = { type: T, payload: WebCommand[T] };
@@ -62,7 +74,7 @@ async function handleMessage(data: any) {
                 let answer = await peer.createAnswer();
                 await peer.setLocalDescription(answer);
                 console.log("[SDP] Sending answer:\n%s", answer.sdp);
-                sendCommand("RtcSetRemoteDescription", { sdp: answer.sdp, mode: "answer" });
+                sendCommand("RtcSetRemoteDescription", { sdp: processOutgoingSdp(answer.sdp), mode: "answer" });
             }
             break;
         }
@@ -163,8 +175,29 @@ async function initializePeerVideo(peer: RTCPeerConnection) {
         }
     }
 
-    let sender = peer.addTrack(stream.getVideoTracks()[0]);
-    showVideoStream(stream);
+    const track = stream.getVideoTracks()[0];
+
+    const canvas = document.createElement("canvas");
+    canvas.getContext("2d");
+    const cstream = canvas.captureStream(1);
+    const transceiver = peer.addTransceiver(cstream.getVideoTracks()[0]);
+
+    //track.enabled = false;
+    setTimeout(() => {
+        track.enabled = false;
+        transceiver.sender.replaceTrack(track).then(() => {
+            console.error("Track replaced 2");
+            console.error(track.enabled);
+            console.error(transceiver.currentDirection);
+            track.enabled = true;
+        });
+    }, 2000);
+
+    //const transceiver = peer.addTransceiver(stream.getVideoTracks()[0]);
+    //transceiver.direction = "sendrecv";
+    //(window as any).tr = transceiver;
+    //let sender = peer.addTrack(stream.getVideoTracks()[0]);
+    //showVideoStream(stream);
 
     /*
     setTimeout(() => {
@@ -268,14 +301,11 @@ async function initializePeer() {
             audioElement.autoplay = true;
             audioElement.muted = true;
             (window as any).audioElement = audioElement;
-
-            if(event.streams[0]) {
-                let stream = audioContext.createMediaStreamSource(event.streams[0]);
-                //stream.connect(audioContext.destination);
-            }
         } else if(event.track.kind === "video") {
             console.error("Received video track");
-            showVideoStream(stream);
+            let str = new MediaStream();
+            str.addTrack(event.track);
+            showVideoStream(str);
         }
     };
 
@@ -298,7 +328,7 @@ async function initializePeer() {
     await peer.setLocalDescription(offer);
 
     console.log("[SDP] Offer:\n%s", offer.sdp);
-    sendCommand("RtcSetRemoteDescription", { sdp: offer.sdp, mode: "offer" });
+    sendCommand("RtcSetRemoteDescription", { sdp: processOutgoingSdp(offer.sdp), mode: "offer" });
 
     /* if something changes, signal it to the remote */
     peer.onnegotiationneeded = async () => {
@@ -313,7 +343,7 @@ async function initializePeer() {
         await peer.setLocalDescription(offer);
 
         console.log("[SDP] Offer (Nego):\n%s", offer.sdp);
-        sendCommand("RtcSetRemoteDescription", { sdp: offer.sdp, mode: "offer" });
+        sendCommand("RtcSetRemoteDescription", { sdp: processOutgoingSdp(offer.sdp), mode: "offer" });
     }
 }
 
