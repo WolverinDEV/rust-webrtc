@@ -206,7 +206,7 @@ impl MediaLine {
                     return Err(MediaLineParseError::MissingCodecDescription(*format));
                 }
 
-                result.remote_codecs.push(codec.unwrap());
+                self.remote_codecs.push(codec.unwrap());
             }
         } else {
             return Err(MediaLineParseError::InvalidFormatList);
