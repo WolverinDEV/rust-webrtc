@@ -107,6 +107,8 @@ pub struct PeerConnection {
     peer_poll_waker: Option<Waker>,
 
     ice_agent: libnice::ice::Agent,
+    ice_port_range: Option<(u16, u16)>,
+
     transport: BTreeMap<u32, Rc<RefCell<RTCTransport>>>,
     media_lines: Vec<Rc<RefCell<MediaLine>>>,
 
@@ -181,6 +183,8 @@ pub struct PeerConnectionBuilder {
 
     allow_application_channel: bool,
 
+    ice_port_range: Option<(u16, u16)>,
+
     ice_tcp: bool,
     ice_udp: bool,
 
@@ -203,6 +207,8 @@ impl PeerConnectionBuilder {
             nice_flags: NiceAgentOption_NICE_AGENT_OPTION_ICE_TRICKLE,
 
             allow_application_channel: true,
+
+            ice_port_range: None,
 
             ice_tcp: true,
             ice_udp: true,
@@ -242,6 +248,11 @@ impl PeerConnectionBuilder {
 
     pub fn allow_application_channel(&mut self, enabled: bool) -> &mut Self {
         self.allow_application_channel = enabled;
+        self
+    }
+
+    pub fn ice_port_range(&mut self, port_range: (u16, u16)) -> &mut Self {
+        self.ice_port_range = Some(port_range);
         self
     }
 
@@ -295,6 +306,12 @@ impl PeerConnectionBuilder {
             return Err(String::from("at least one ice transport type (tcp, udp) must be activated"));
         }
 
+        if let Some(port_range) = &self.ice_port_range {
+            if port_range.0 >= port_range.1 {
+                return Err(String::from("invalid ice port range"));
+            }
+        }
+
         let mut connection = PeerConnection{
             logger: logger.clone(),
 
@@ -307,6 +324,8 @@ impl PeerConnectionBuilder {
             origin_username: String::from("-"),
 
             ice_agent: libnice::ice::Agent::new_full(event_context, self.nice_compatibility, self.nice_flags),
+            ice_port_range: self.ice_port_range.clone(),
+
             transport: BTreeMap::new(),
 
             stream_receiver: BTreeMap::new(),
@@ -852,7 +871,11 @@ impl PeerConnection {
         slog_debug!(self.logger, "Creating a new transport channel (Owner: {})", owning_media_line);
 
         /* register a new channel */
-        let stream = libnice::ice::Agent::stream_builder(&mut self.ice_agent, 1).build()
+        let mut stream = libnice::ice::Agent::stream_builder(&mut self.ice_agent, 1);
+        if let Some(port_range) = &self.ice_port_range {
+            stream.set_port_range(port_range.0, port_range.1);
+        }
+        let stream = stream.build()
             .map_err(|error| RTCTransportInitializeError::IceStreamAllocationFailed { error })?;
 
         #[allow(unused_mut)]
