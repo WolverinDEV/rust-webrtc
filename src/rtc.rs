@@ -16,7 +16,7 @@ use webrtc_sdp::{SdpSession, SdpOrigin, SdpTiming};
 use webrtc_sdp::address::ExplicitlyTypedAddress;
 use std::net::{IpAddr, Ipv4Addr};
 use libnice::ffi::{NiceCompatibility, NiceAgentProperty};
-use libnice::sys::{NiceAgentOption_NICE_AGENT_OPTION_ICE_TRICKLE};
+use libnice::sys::{NiceAgentOption_NICE_AGENT_OPTION_ICE_TRICKLE, NiceAgentOption};
 use crate::application::{ChannelApplication, DataChannel, ApplicationChannelEvent};
 use crate::media::{MediaLine, MediaLineParseError, ActiveInternalMediaReceiver, MediaReceiver, InternalMediaSender, InternalMediaTrack, MediaSender, NegotiationState, InternalMediaReceiver, MediaSenderEvent};
 use crate::utils::rtp::ParsedRtpPacket;
@@ -170,11 +170,133 @@ macro_rules! get_attribute_value {
     }
 }
 
-impl PeerConnection {
-    pub fn new(event_loop: MainContext, logger: slog::Logger) -> Self {
-        let logger_clone = logger.clone();
+pub struct PeerConnectionBuilder {
+    event_loop: Option<MainContext>,
+    logger: Option<slog::Logger>,
+
+    stun: Option<(String, u16)>,
+
+    nice_compatibility: NiceCompatibility,
+    nice_flags: NiceAgentOption,
+
+    allow_application_channel: bool,
+
+    ice_tcp: bool,
+    ice_udp: bool,
+
+    ice_upnp: bool,
+
+    dispatch_unassignable_packets: bool,
+    dispatch_unknown_packets: bool,
+    dispatch_undecodable_packets: bool,
+}
+
+impl PeerConnectionBuilder {
+    fn new() -> Self {
+        PeerConnectionBuilder {
+            event_loop: None,
+            logger: None,
+
+            stun: None,
+
+            nice_compatibility: NiceCompatibility::RFC5245,
+            nice_flags: NiceAgentOption_NICE_AGENT_OPTION_ICE_TRICKLE,
+
+            allow_application_channel: true,
+
+            ice_tcp: true,
+            ice_udp: true,
+
+            ice_upnp: false,
+
+            dispatch_unassignable_packets: false,
+            dispatch_undecodable_packets: false,
+            dispatch_unknown_packets: false
+        }
+    }
+
+    pub fn event_loop(&mut self, context: MainContext) -> &mut Self {
+        self.event_loop = Some(context);
+        self
+    }
+
+    pub fn logger(&mut self, logger: slog::Logger) -> &mut Self {
+        self.logger = Some(logger);
+        self
+    }
+
+    pub fn stun(&mut self, server: (String, u16)) -> &mut Self {
+        self.stun = Some(server);
+        self
+    }
+
+    pub fn nice_compatibility(&mut self, compatibility: NiceCompatibility) -> &mut Self {
+        self.nice_compatibility = compatibility;
+        self
+    }
+
+    pub fn nice_flags(&mut self, flags: NiceAgentOption) -> &mut Self {
+        self.nice_flags = flags;
+        self
+    }
+
+    pub fn allow_application_channel(&mut self, enabled: bool) -> &mut Self {
+        self.allow_application_channel = enabled;
+        self
+    }
+
+    pub fn ice_tcp(&mut self, enabled: bool) -> &mut Self {
+        self.ice_tcp = enabled;
+        self
+    }
+
+    pub fn ice_udp(&mut self, enabled: bool) -> &mut Self {
+        self.ice_udp = enabled;
+        self
+    }
+
+    pub fn ice_upnp(&mut self, enabled: bool) -> &mut Self {
+        self.ice_upnp = enabled;
+        self
+    }
+
+    pub fn dispatch_unassignable_packets(&mut self, enabled: bool) -> &mut Self {
+        self.dispatch_unassignable_packets = enabled;
+        self
+    }
+
+    pub fn dispatch_undecodable_packets(&mut self, enabled: bool) -> &mut Self {
+        self.dispatch_unassignable_packets = enabled;
+        self
+    }
+
+    pub fn dispatch_unknown_packets(&mut self, enabled: bool) -> &mut Self {
+        self.dispatch_unassignable_packets = enabled;
+        self
+    }
+
+    /// Alias for
+    /// - `self.dispatch_unassignable_packets(enabled)`
+    /// - `self.dispatch_unknown_packets(enabled)`
+    /// - `self.dispatch_undecodable_packets(enabled)`
+    pub fn dispatch_all_packets(&mut self, enabled: bool) -> &mut Self {
+        self.dispatch_unassignable_packets(enabled);
+        self.dispatch_unknown_packets(enabled);
+        self.dispatch_undecodable_packets(enabled);
+        self
+    }
+
+
+    pub fn create(&self) -> Result<PeerConnection, String> {
+        let logger = self.logger.clone().ok_or(String::from("missing logger"))?;
+        let event_context = self.event_loop.clone().ok_or(String::from("missing event loop"))?;
+
+        if !self.ice_tcp && !self.ice_udp {
+            return Err(String::from("at least one ice transport type (tcp, udp) must be activated"));
+        }
+
         let mut connection = PeerConnection{
-            logger,
+            logger: logger.clone(),
 
             state: PeerConnectionState::New,
             signalling_state: SignallingState::None,
@@ -184,7 +306,7 @@ impl PeerConnection {
             /* "-" indicates no username */
             origin_username: String::from("-"),
 
-            ice_agent: libnice::ice::Agent::new_full(event_loop, NiceCompatibility::RFC5245, NiceAgentOption_NICE_AGENT_OPTION_ICE_TRICKLE),
+            ice_agent: libnice::ice::Agent::new_full(event_context, self.nice_compatibility, self.nice_flags),
             transport: BTreeMap::new(),
 
             stream_receiver: BTreeMap::new(),
@@ -202,20 +324,29 @@ impl PeerConnection {
         };
 
         connection.ice_agent.get_ffi_agent().on_selected_pair(move |stream_id, component_id, local_candidate, remote_candidate| {
-            slog_debug!(logger_clone, "Changed candidate pair for stream {} (Component: {}). Local candidate: {}. Remote candidate: {}",
+            slog_debug!(logger, "Changed candidate pair for stream {} (Component: {}). Local candidate: {}. Remote candidate: {}",
                 stream_id, component_id, local_candidate.to_sdp().to_string(), remote_candidate.to_sdp().to_string());
         }).unwrap();
-        //connection.ice_agent.get_ffi_agent().set_nice_property(NiceAgentProperty::StunServer(Some(String::from("74.125.143.127"))));//stun.l.google.com
-        //connection.ice_agent.get_ffi_agent().set_nice_property(NiceAgentProperty::StunPort(19302));
 
-        connection.ice_agent.get_ffi_agent().set_nice_property(NiceAgentProperty::IceTcp(false)).unwrap();
-        connection.ice_agent.get_ffi_agent().set_nice_property(NiceAgentProperty::IceUdp(true)).unwrap();
+        if let Some(stun) = &self.stun {
+            connection.ice_agent.get_ffi_agent().set_nice_property(NiceAgentProperty::StunServer(Some(stun.0.clone())));
+            connection.ice_agent.get_ffi_agent().set_nice_property(NiceAgentProperty::StunPort(stun.1 as u32));
+        }
 
-        connection.ice_agent.get_ffi_agent().set_nice_property(NiceAgentProperty::Upnp(false)).unwrap();
+        connection.ice_agent.get_ffi_agent().set_nice_property(NiceAgentProperty::IceTcp(self.ice_tcp)).unwrap();
+        connection.ice_agent.get_ffi_agent().set_nice_property(NiceAgentProperty::IceUdp(self.ice_udp)).unwrap();
+
+        connection.ice_agent.get_ffi_agent().set_nice_property(NiceAgentProperty::Upnp(self.ice_upnp)).unwrap();
         connection.ice_agent.get_ffi_agent().set_nice_property(NiceAgentProperty::ControllingMode(false)).unwrap();
         connection.ice_agent.get_ffi_agent().set_nice_property(NiceAgentProperty::IceTrickle(true)).unwrap();
 
-        connection
+        Ok(connection)
+    }
+}
+
+impl PeerConnection {
+    pub fn builder() -> PeerConnectionBuilder {
+        PeerConnectionBuilder::new()
     }
 
     fn dispatch_peer_event(&mut self, event: PeerConnectionEvent) {

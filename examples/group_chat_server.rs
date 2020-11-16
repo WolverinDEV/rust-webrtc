@@ -81,9 +81,15 @@ impl Default for ClientData {
         /* FIXME: Generate a client id */
         let logger = slog::Logger::root(drain, o!("client-id" => 0));
 
+        let peer = PeerConnection::builder()
+            .logger(logger)
+            .event_loop(event_context)
+            .dispatch_all_packets(true)
+            .create().expect("failed to create peer connection");
+
         ClientData {
             client_id: 0,
-            peer: PeerConnection::new(event_context, logger),
+            peer,
             peer_abort: None,
 
             media_broadcast_abort: None,
@@ -455,10 +461,21 @@ fn handle_command(client: Arc<Mutex<Client<ClientData>>>, command: &WebCommand) 
                 }
             };
             /* Testing media sender adding before the peer has been initialized */
-            if mode == RtcDescriptionType::Offer && false {
+            if mode == RtcDescriptionType::Offer {
                 let mut stream = locked_client.data.peer.create_media_sender(SdpMediaValue::Video);
                 stream.register_property(String::from("msid"), Some(String::from("PreICETest -")));
                 //forget(stream);
+                tokio::spawn(tokio::future::poll_fn(move |cx| {
+                    while let Poll::Ready(event) = stream.poll_next_unpin(cx) {
+                        if event.is_none() {
+                            return Poll::Ready(());
+                        }
+
+                        println!("XXXXXXXXXX - Event: {:?}", event);
+                    }
+
+                    Poll::Pending
+                }));
             }
 
             locked_client.data.peer.set_remote_description(&sdp, &mode).map_err(|err| format!("{:?}", err))?;
