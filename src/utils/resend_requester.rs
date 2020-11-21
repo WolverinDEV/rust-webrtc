@@ -255,6 +255,7 @@ impl RtpPacketResendRequester {
                 if difference >= 1000 {
                     /* that packet is being lost... don't recover, count as timeout */
                     self.temp_lost_packets.push(packet_index);
+                    self.pending_timestamps[index] = 0xFFFFFFFF;
                 } else {
                     self.temp_resend_packets.push(packet_index);
                 }
