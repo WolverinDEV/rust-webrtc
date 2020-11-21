@@ -45,6 +45,7 @@ pub struct RtpPacketResendRequester {
     clipping_window: u16,
 
     nack_delay: u32,
+    resend_request_interval: u32,
 
     events: (mpsc::UnboundedSender<RtpPacketResendRequesterEvent>, mpsc::UnboundedReceiver<RtpPacketResendRequesterEvent>),
     resend_delay: Option<tokio::time::Delay>,
@@ -74,6 +75,7 @@ impl RtpPacketResendRequester {
             clipping_window: 1024,
 
             nack_delay: 5,
+            resend_request_interval: 25,
 
             events: mpsc::unbounded_channel(),
             resend_delay: None,
@@ -93,6 +95,10 @@ impl RtpPacketResendRequester {
 
     pub fn set_nack_delay(&mut self, delay: u32) {
         self.nack_delay = delay;
+    }
+
+    pub fn set_resend_interval(&mut self, interval: u32) {
+        self.resend_request_interval = interval;
     }
 
     pub fn reset(&mut self) {
@@ -270,7 +276,7 @@ impl RtpPacketResendRequester {
             let _ = self.events.0.send(RtpPacketResendRequesterEvent::ResendPackets(self.temp_resend_packets.clone()));
             self.temp_resend_packets.truncate(RESEND_PACKETS_TMP_BUFFER_LENGTH);
             /* TODO: Use RTT */
-            self.resend_delay = Some(tokio::time::delay_for(Duration::from_millis(100)));
+            self.resend_delay = Some(tokio::time::delay_for(Duration::from_millis(self.resend_request_interval as u64)));
         } else if next_minimal_expected_time != 0xFFFFFFFF {
             self.resend_delay = Some(tokio::time::delay_for(Duration::from_millis((next_minimal_expected_time - current_time) as u64)));
         }
