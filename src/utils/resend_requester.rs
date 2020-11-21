@@ -91,6 +91,10 @@ impl RtpPacketResendRequester {
         self.reset();
     }
 
+    pub fn set_nack_delay(&mut self, delay: u32) {
+        self.nack_delay = delay;
+    }
+
     pub fn reset(&mut self) {
         self.resend_delay = None;
         self.last_packet_id = SequenceNumber::new(0);
