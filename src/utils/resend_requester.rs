@@ -23,8 +23,6 @@ pub enum RtpPacketResendRequesterEvent {
     PacketTimedOut(Vec<SequenceNumber<u16>>)
 }
 
-const RECEIVE_WINDOW_SIZE: usize = 64;
-
 /// Listens to the incoming packet ids and request resends if required
 pub struct RtpPacketResendRequester {
     base_timestamp: u64,
@@ -41,7 +39,7 @@ pub struct RtpPacketResendRequester {
     /// Buffer containing the expected arrival timestamps.
     /// If zero, the packet has been received.
     /// Array size must be a power of two, else we'll receive unexpected results when the packet id wraps.
-    pending_timestamps: [u32; RECEIVE_WINDOW_SIZE],
+    pending_timestamps: Vec<u32>,
 
     /* must be at least the receive_timestamps length, else black magic happens */
     clipping_window: u16,
@@ -49,11 +47,17 @@ pub struct RtpPacketResendRequester {
     nack_delay: u32,
 
     events: (mpsc::UnboundedSender<RtpPacketResendRequesterEvent>, mpsc::UnboundedReceiver<RtpPacketResendRequesterEvent>),
-    resend_delay: Option<tokio::time::Delay>
+    resend_delay: Option<tokio::time::Delay>,
+
+    temp_resend_packets: Vec<SequenceNumber<u16>>,
+    temp_lost_packets: Vec<SequenceNumber<u16>>,
 }
 
+const RESEND_PACKETS_TMP_BUFFER_LENGTH: usize = 32;
+const LOST_PACKETS_TMP_BUFFER_LENGTH: usize = 32;
+
 impl RtpPacketResendRequester {
-    pub fn new() -> Self {
+    pub fn new(frame_size: Option<usize>) -> Self {
         let base_time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)
             .unwrap().as_millis() as u64;
 
@@ -65,15 +69,26 @@ impl RtpPacketResendRequester {
 
             pending_index: SequenceNumber::new(0),
             pending_timestamp_index: 0,
-            pending_timestamps: [0xFFFFFFFF; RECEIVE_WINDOW_SIZE],
+            pending_timestamps: vec![0xFFFFFFFF; frame_size.unwrap_or(64)],
 
             clipping_window: 1024,
 
             nack_delay: 5,
 
             events: mpsc::unbounded_channel(),
-            resend_delay: None
+            resend_delay: None,
+
+            temp_resend_packets: Vec::with_capacity(RESEND_PACKETS_TMP_BUFFER_LENGTH),
+            temp_lost_packets: Vec::with_capacity(LOST_PACKETS_TMP_BUFFER_LENGTH)
         }
+    }
+
+    pub fn set_frame_size(&mut self, frame_size: usize) {
+        /* FIXME: Just update the buffer size instead of resetting everything */
+
+        self.flush_pending_packets(true);
+        self.pending_timestamps.resize(frame_size, 0xFFFFFFFF);
+        self.reset();
     }
 
     pub fn reset(&mut self) {
@@ -84,6 +99,7 @@ impl RtpPacketResendRequester {
         self.flush_pending_packets(false);
         self.pending_timestamp_index = 0;
         self.pending_index = self.last_packet_id;
+        self.pending_timestamps.iter_mut().for_each(|val| *val = 0xFFFFFFFF);
     }
 
     pub fn reset_resends(&mut self) {
@@ -121,22 +137,20 @@ impl RtpPacketResendRequester {
             /* new_packets is ideally 1 which means that we've received an in order packet */
             let new_packets = distance - self.pending_timestamps.len() + 1;
 
-            let mut lost_packets = [SequenceNumber::new(0); RECEIVE_WINDOW_SIZE];
-            let mut lost_packets_count = 0;
-
+            self.temp_lost_packets.clear();
             /* TODO: Add RTT here, else out of order packets are directly counted as loss */
             let expected_arrival_timestamp = self.current_timestamp() + self.nack_delay;
 
             for index in 0..new_packets {
                 let timestamp_index = (self.pending_timestamp_index + index) % self.pending_timestamps.len();
                 if std::mem::replace(&mut self.pending_timestamps[timestamp_index], expected_arrival_timestamp) != 0xFFFFFFFF {
-                    lost_packets[lost_packets_count] = self.pending_index + index as u16;
-                    lost_packets_count = lost_packets_count + 1;
+                    self.temp_lost_packets.push(self.pending_index + index as u16);
                 }
             }
 
-            if lost_packets_count > 0 {
-                let _ = self.events.0.send(RtpPacketResendRequesterEvent::PacketTimedOut(lost_packets[0..lost_packets_count].to_vec()));
+            if !self.temp_lost_packets.is_empty() {
+                let _ = self.events.0.send(RtpPacketResendRequesterEvent::PacketTimedOut(self.temp_lost_packets.clone()));
+                self.temp_lost_packets.truncate(LOST_PACKETS_TMP_BUFFER_LENGTH);
             }
 
             self.pending_index = self.pending_index + new_packets as u16;
@@ -191,14 +205,12 @@ impl RtpPacketResendRequester {
         let mut index = self.pending_timestamp_index;
         let mut packet_index = self.pending_index;
 
-        let mut lost_packets = [SequenceNumber::new(0); RECEIVE_WINDOW_SIZE];
-        let mut lost_packets_count = 0;
+        self.temp_lost_packets.clear();
 
         loop {
             if self.pending_timestamps[index] != 0xFFFFFFFF {
                 self.pending_timestamps[index] = 0xFFFFFFFF; /* mark slot as received */
-                lost_packets[lost_packets_count] = packet_index;
-                lost_packets_count = lost_packets_count + 1;
+                self.temp_lost_packets.push(packet_index);
             }
 
             index = (index + 1) % self.pending_timestamps.len();
@@ -206,8 +218,9 @@ impl RtpPacketResendRequester {
             packet_index = packet_index + 1;
         }
 
-        if emit_lost && lost_packets_count > 0 {
-            let _ = self.events.0.send(RtpPacketResendRequesterEvent::PacketTimedOut(lost_packets[0..lost_packets_count].to_vec()));
+        if emit_lost && !self.temp_lost_packets.is_empty() {
+            let _ = self.events.0.send(RtpPacketResendRequesterEvent::PacketTimedOut(self.temp_lost_packets.clone()));
+            self.temp_lost_packets.truncate(LOST_PACKETS_TMP_BUFFER_LENGTH);
         }
     }
 
@@ -217,11 +230,8 @@ impl RtpPacketResendRequester {
             return;
         }
 
-        let mut resend_packets = [SequenceNumber::new(0); RECEIVE_WINDOW_SIZE];
-        let mut resend_packets_count = 0;
-
-        let mut lost_packets = [SequenceNumber::new(0); RECEIVE_WINDOW_SIZE];
-        let mut lost_packets_count = 0;
+        self.temp_resend_packets.clear();
+        self.temp_lost_packets.clear();
 
         let mut index = self.pending_timestamp_index;
         let mut packet_index = self.pending_index;
@@ -234,11 +244,9 @@ impl RtpPacketResendRequester {
                 let difference = current_time - self.pending_timestamps[index];
                 if difference >= 1000 {
                     /* that packet is being lost... don't recover, count as timeout */
-                    lost_packets[lost_packets_count] = packet_index;
-                    lost_packets_count = lost_packets_count + 1;
+                    self.temp_lost_packets.push(packet_index);
                 } else {
-                    resend_packets[resend_packets_count] = packet_index;
-                    resend_packets_count = resend_packets_count + 1;
+                    self.temp_resend_packets.push(packet_index);
                 }
             } else {
                 next_minimal_expected_time = next_minimal_expected_time.min(self.pending_timestamps[index]);
@@ -249,13 +257,14 @@ impl RtpPacketResendRequester {
             packet_index = packet_index + 1;
         }
 
-        if lost_packets_count > 0 {
-            let _ = self.events.0.send(RtpPacketResendRequesterEvent::PacketTimedOut(lost_packets[0..lost_packets_count].to_vec()));
+        if !self.temp_lost_packets.is_empty() {
+            let _ = self.events.0.send(RtpPacketResendRequesterEvent::PacketTimedOut(self.temp_lost_packets.clone()));
+            self.temp_lost_packets.truncate(LOST_PACKETS_TMP_BUFFER_LENGTH);
         }
 
-        if resend_packets_count > 0 {
-            let _ = self.events.0.send(RtpPacketResendRequesterEvent::ResendPackets(resend_packets[0..resend_packets_count].to_vec()));
-
+        if !self.temp_resend_packets.is_empty() {
+            let _ = self.events.0.send(RtpPacketResendRequesterEvent::ResendPackets(self.temp_resend_packets.clone()));
+            self.temp_resend_packets.truncate(RESEND_PACKETS_TMP_BUFFER_LENGTH);
             /* TODO: Use RTT */
             self.resend_delay = Some(tokio::time::delay_for(Duration::from_millis(100)));
         } else if next_minimal_expected_time != 0xFFFFFFFF {
@@ -293,7 +302,7 @@ mod test {
     #[test]
     fn test_init_setup() {
         tokio_test::block_on(async {
-            let mut instance = RtpPacketResendRequester::new();
+            let mut instance = RtpPacketResendRequester::new(Some(32));
             assert_eq!(instance.handle_packet_received(SequenceNumber::new(222)), PacketReceivedResult::Success);
             assert!(instance.missing_packets().is_empty());
 
@@ -319,7 +328,7 @@ mod test {
     #[test]
     fn test_wrap() {
         tokio_test::block_on(async {
-            let mut instance = RtpPacketResendRequester::new();
+            let mut instance = RtpPacketResendRequester::new(Some(32));
             assert_eq!(instance.handle_packet_received(SequenceNumber::new(0xFFFE)), PacketReceivedResult::Success);
             assert!(instance.missing_packets().is_empty());
 
@@ -340,7 +349,7 @@ mod test {
     #[test]
     fn test_wrap_loss_0() {
         tokio_test::block_on(async {
-            let mut instance = RtpPacketResendRequester::new();
+            let mut instance = RtpPacketResendRequester::new(Some(32));
             assert_eq!(instance.handle_packet_received(SequenceNumber::new(0xFFFE)), PacketReceivedResult::Success);
             assert!(instance.missing_packets().is_empty());
 
@@ -358,7 +367,7 @@ mod test {
     #[test]
     fn test_wrap_loss_1() {
         tokio_test::block_on(async {
-            let mut instance = RtpPacketResendRequester::new();
+            let mut instance = RtpPacketResendRequester::new(Some(32));
             assert_eq!(instance.handle_packet_received(SequenceNumber::new(0xFFFE)), PacketReceivedResult::Success);
             assert!(instance.missing_packets().is_empty());
 
@@ -376,7 +385,7 @@ mod test {
     #[test]
     fn test_general_loss_1() {
         tokio_test::block_on(async {
-            let mut instance = RtpPacketResendRequester::new();
+            let mut instance = RtpPacketResendRequester::new(Some(32));
             for id in 0..10000 {
                 instance.handle_packet_received(SequenceNumber::new(id as u16));
                 instance.advance_clock(1000);

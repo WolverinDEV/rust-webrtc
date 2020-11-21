@@ -348,8 +348,8 @@ impl PeerConnectionBuilder {
         }).unwrap();
 
         if let Some(stun) = &self.stun {
-            connection.ice_agent.get_ffi_agent().set_nice_property(NiceAgentProperty::StunServer(Some(stun.0.clone())));
-            connection.ice_agent.get_ffi_agent().set_nice_property(NiceAgentProperty::StunPort(stun.1 as u32));
+            connection.ice_agent.get_ffi_agent().set_nice_property(NiceAgentProperty::StunServer(Some(stun.0.clone()))).unwrap();
+            connection.ice_agent.get_ffi_agent().set_nice_property(NiceAgentProperty::StunPort(stun.1 as u32)).unwrap();
         }
 
         connection.ice_agent.get_ffi_agent().set_nice_property(NiceAgentProperty::IceTcp(self.ice_tcp)).unwrap();
@@ -411,6 +411,11 @@ impl PeerConnection {
     pub fn media_line_by_sdp_index(&self, index: usize) -> Option<Rc<RefCell<MediaLine>>> {
         self.media_lines.iter().find(|e| RefCell::borrow(e).sdp_index() == &Some(index))
             .map(|e| e.clone())
+    }
+
+    pub fn get_resend_requester(&mut self, receiver_id: u32) -> Option<&mut RtpPacketResendRequester> {
+        self.stream_receiver.get_mut(&receiver_id)
+            .and_then(|e| e.resend_requester())
     }
 
     pub fn reset(&mut self) {
@@ -607,7 +612,7 @@ impl PeerConnection {
 
                 properties: HashMap::new(),
 
-                resend_requester: RtpPacketResendRequester::new(),
+                resend_requester: RtpPacketResendRequester::new(None),
                 rtcp_sender: transport.create_rtcp_sender()
             };
             internal_receiver.parse_properties_from_sdp(media);

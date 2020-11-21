@@ -90,6 +90,7 @@ impl MediaReceiver {
 pub(crate) trait InternalMediaReceiver : Future<Output = ()> + Unpin {
     fn track(&self) -> &InternalMediaTrack;
     fn properties(&self) -> &HashMap<String, Option<String>>;
+    fn resend_requester(&mut self) -> Option<&mut RtpPacketResendRequester>;
 
     fn parse_properties_from_sdp(&mut self, media: &SdpMedia);
 
@@ -119,6 +120,10 @@ impl InternalMediaReceiver for VoidInternalMediaReceiver {
 
     fn properties(&self) -> &HashMap<String, Option<String>, RandomState> {
         &self.properties
+    }
+
+    fn resend_requester(&mut self) -> Option<&mut RtpPacketResendRequester> {
+        None
     }
 
     fn parse_properties_from_sdp(&mut self, media: &SdpMedia) {
@@ -183,6 +188,10 @@ impl InternalMediaReceiver for ActiveInternalMediaReceiver {
 
     fn properties(&self) -> &HashMap<String, Option<String>, RandomState> {
         &self.properties
+    }
+
+    fn resend_requester(&mut self) -> Option<&mut RtpPacketResendRequester> {
+        Some(&mut self.resend_requester)
     }
 
     fn parse_properties_from_sdp(&mut self, media: &SdpMedia) {

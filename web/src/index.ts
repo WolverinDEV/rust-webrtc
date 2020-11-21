@@ -1,5 +1,5 @@
 import {VirtualCamera} from "./VirtualCamera";
-import * as sdpTransform from "sdp-transform";
+import {patchLocalSdp, patchRemoteSdp} from "./SdpPatch";
 
 let socket: WebSocket;
 let peer: RTCPeerConnection;
@@ -32,17 +32,6 @@ async function connect() {
     //socket.close();
 }
 
-function processOutgoingSdp(sdpString: string) : string {
-    const sdp = sdpTransform.parse(sdpString);
-
-    /* apply the "root" fingerprint to each media, FF fix */
-    if(sdp.fingerprint) {
-        sdp.media.forEach(media => media.fingerprint = sdp.fingerprint);
-    }
-
-    return sdpTransform.write(sdp);
-}
-
 type ReceivedMessage<T extends keyof WebCommand> = { type: T, payload: WebCommand[T] };
 async function handleMessage(data: any) {
     const message = JSON.parse(data) as ReceivedMessage<keyof WebCommand>;
@@ -62,7 +51,7 @@ async function handleMessage(data: any) {
             const payload = message.payload as WebCommand["RtcSetRemoteDescription"];
             if(!peer) { throw "Missing peer"; }
 
-            let sdp = payload.sdp.replace("\r\n\r\n", "\r\n");
+            let sdp = patchRemoteSdp(payload.sdp, payload.mode);
             console.log("[SDP] Received %s:\n%s", payload.mode, sdp);
             peer.setRemoteDescription(new RTCSessionDescription({
                 sdp: sdp.replace(/\r?\n\r?\n/g, "\n"),
@@ -72,9 +61,10 @@ async function handleMessage(data: any) {
             });
             if(payload.mode === "offer") {
                 let answer = await peer.createAnswer();
+                answer.sdp = patchLocalSdp(answer.sdp, "answer");
                 await peer.setLocalDescription(answer);
                 console.log("[SDP] Sending answer:\n%s", answer.sdp);
-                sendCommand("RtcSetRemoteDescription", { sdp: processOutgoingSdp(answer.sdp), mode: "answer" });
+                sendCommand("RtcSetRemoteDescription", { sdp: answer.sdp, mode: "answer" });
             }
             break;
         }
@@ -328,22 +318,22 @@ async function initializePeer() {
     await peer.setLocalDescription(offer);
 
     console.log("[SDP] Offer:\n%s", offer.sdp);
-    sendCommand("RtcSetRemoteDescription", { sdp: processOutgoingSdp(offer.sdp), mode: "offer" });
+    sendCommand("RtcSetRemoteDescription", { sdp: patchLocalSdp(offer.sdp, "offer"), mode: "offer" });
 
     /* if something changes, signal it to the remote */
     peer.onnegotiationneeded = async () => {
         console.error("Nego needed");
         return;
 
-        let offer = await peer.createOffer({
+        const offer = await peer.createOffer({
             offerToReceiveAudio: kEnableAudio,
             offerToReceiveVideo: kEnableVideo
         });
-        //offer.sdp = offer.sdp.replace(/111/g, "123");
+        offer.sdp = patchLocalSdp(offer.sdp, "offer");
         await peer.setLocalDescription(offer);
 
         console.log("[SDP] Offer (Nego):\n%s", offer.sdp);
-        sendCommand("RtcSetRemoteDescription", { sdp: processOutgoingSdp(offer.sdp), mode: "offer" });
+        sendCommand("RtcSetRemoteDescription", { sdp: patchLocalSdp(offer.sdp, "offer"), mode: "offer" });
     }
 }
 
