@@ -589,7 +589,7 @@ impl PeerConnection {
         }).count();
 
         for receiver_id in media_line.remote_streams.iter() {
-            if self.stream_sender.contains_key(&receiver_id) {
+            if self.stream_receiver.contains_key(&receiver_id) {
                 /* TODO: Check if codec or formats have changed and if so fail */
                 continue;
             }
