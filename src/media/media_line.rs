@@ -238,7 +238,7 @@ impl MediaLine {
             address: ExplicitlyTypedAddress::Ip(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
             ttl: None,
             amount: None
-        }).unwrap();
+        });
 
         if let Some(media_id) = &self.media_id {
             media.add_attribute(SdpAttribute::Mid(media_id.clone())).unwrap();

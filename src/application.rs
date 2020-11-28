@@ -494,7 +494,7 @@ impl ChannelApplication {
             address: ExplicitlyTypedAddress::Ip(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
             ttl: None,
             amount: None
-        }).unwrap();
+        });
 
         media.add_attribute(SdpAttribute::Sctpmap(SdpAttributeSctpmap{
             port: self.sctp_session.local_port,
