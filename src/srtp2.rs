@@ -116,6 +116,8 @@ pub struct Srtp2 {
     state: ffi::srtp_t
 }
 
+unsafe impl Send for Srtp2 {}
+
 /// Globally initialize Srtp.
 /// This function *must* be called before any calls to the srtp library happen
 pub fn srtp2_global_init() -> Result<(), Srtp2ErrorCode> {
