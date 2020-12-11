@@ -56,7 +56,7 @@ pub struct MediaReceiver {
     resend_requester: RtpPacketResendRequester,
     rtcp_sender: RtcpSender,
 
-    timer_bandwidth_watcher: tokio::time::Interval
+    timer_bandwidth_watcher: Option<tokio::time::Interval>
 }
 
 impl MediaReceiver {
@@ -76,7 +76,7 @@ impl MediaReceiver {
             resend_requester: RtpPacketResendRequester::new(None),
             rtcp_sender,
 
-            timer_bandwidth_watcher: tokio::time::interval(Duration::from_secs(5))
+            timer_bandwidth_watcher: None
         }
     }
 
@@ -136,8 +136,8 @@ impl MediaReceiver {
 
         {
             let mut writer = Cursor::new(&mut buffer[..]);
-            writer.write_u32::<BigEndian>(REMB_IDENTIFIER);
-            writer.write_u8(1);
+            writer.write_u32::<BigEndian>(REMB_IDENTIFIER).unwrap();
+            writer.write_u8(1).unwrap();
 
             let mut mantissa = bandwidth_limit;
             let mut exponenta: u8 = 0;
@@ -146,14 +146,14 @@ impl MediaReceiver {
                 exponenta += 1;
             }
 
-            writer.write_u8((exponenta << 2) | (mantissa >> 16) as u8);
-            writer.write_u16::<BigEndian>((mantissa & 0xFFFF) as u16);
-            writer.write_u32::<BigEndian>(self.ssrc());
+            writer.write_u8((exponenta << 2) | (mantissa >> 16) as u8).unwrap();
+            writer.write_u16::<BigEndian>((mantissa & 0xFFFF) as u16).unwrap();
+            writer.write_u32::<BigEndian>(self.ssrc()).unwrap();
 
             buffer_length = writer.position();
         }
 
-        self.send_control(&RtcpPacket::PayloadFeedback(RtcpPacketPayloadFeedback {
+        let _ = self.send_control(&RtcpPacket::PayloadFeedback(RtcpPacketPayloadFeedback {
             media_ssrc: self.ssrc(),
             ssrc: 0, /* must be zero by rtf */
             feedback: RtcpPayloadFeedback::ApplicationSpecific(buffer[0..buffer_length as usize].to_vec())
@@ -203,7 +203,11 @@ impl Stream for MediaReceiver {
             }
         }
 
-        while let Poll::Ready(Some(_)) = self.timer_bandwidth_watcher.poll_next_unpin(cx) {
+        if self.timer_bandwidth_watcher.is_none() {
+            self.timer_bandwidth_watcher = Some(tokio::time::interval(Duration::from_secs(5)));
+        }
+
+        while let Poll::Ready(Some(_)) = self.timer_bandwidth_watcher.as_mut().unwrap().poll_next_unpin(cx) {
             if let Some(max_bandwidth) = self.bandwidth_limit {
                 let received_bandwidth = self.statistics.bandwidth_payload_minute();
                 if received_bandwidth as u32 * 8 > max_bandwidth {

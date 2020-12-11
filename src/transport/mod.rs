@@ -22,7 +22,7 @@ use std::rc::Rc;
 use serde::export::Formatter;
 use std::ops::Deref;
 use crate::srtp2::{Srtp2, Srtp2ErrorCode};
-use crate::utils::rtp::{is_rtp_header, ParsedRtpPacket};
+use crate::utils::rtp::{is_rtp_header};
 use crate::utils::rtcp::is_rtcp_header;
 use std::sync::atomic::{AtomicU32, Ordering};
 
