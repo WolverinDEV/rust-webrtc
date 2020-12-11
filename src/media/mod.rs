@@ -10,6 +10,9 @@ pub use media_line::*;
 mod receiver;
 pub use receiver::*;
 
+mod receiver_stats;
+pub use receiver_stats::*;
+
 mod sender;
 pub use sender::*;
 use std::io::Error;

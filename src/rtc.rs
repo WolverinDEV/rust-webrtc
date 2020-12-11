@@ -10,7 +10,7 @@ use futures::task::{Context, Poll};
 use tokio::macros::support::Pin;
 use std::rc::Rc;
 use std::cell::{RefCell, RefMut};
-use std::collections::{HashMap, BTreeMap, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use crate::transport::{RTCTransport, RTCTransportInitializeError, ICECredentials, RTCTransportEvent, RTCTransportICECandidateAddError, RTCTransportState, RTPTransportSetup, RTCTransportDescriptionApplyError};
 use webrtc_sdp::{SdpSession, SdpOrigin, SdpTiming};
 use webrtc_sdp::address::ExplicitlyTypedAddress;
@@ -22,8 +22,6 @@ use crate::media::{MediaLine, MediaLineParseError, ActiveInternalMediaReceiver, 
 use crate::utils::rtp::ParsedRtpPacket;
 use crate::utils::rtcp::RtcpPacket;
 use std::ops::{DerefMut};
-use tokio::sync::mpsc;
-use crate::utils::RtpPacketResendRequester;
 use crate::sctp::message::DataChannelType;
 use std::task::Waker;
 use std::io::Error;
@@ -413,11 +411,6 @@ impl PeerConnection {
             .map(|e| e.clone())
     }
 
-    pub fn get_resend_requester(&mut self, receiver_id: u32) -> Option<&mut RtpPacketResendRequester> {
-        self.stream_receiver.get_mut(&receiver_id)
-            .and_then(|e| e.resend_requester())
-    }
-
     pub fn reset(&mut self) {
         self.event_queue.clear();
 
@@ -595,35 +588,17 @@ impl PeerConnection {
             }
 
             slog_info!(self.logger, "RTP Stream got new {stream} on sdp index {index:?}", stream = receiver_id, index = media_line.sdp_index());
-            let (tx, rx) = mpsc::unbounded_channel();
-
-            let (ctx, crx) = mpsc::unbounded_channel();
-            let mut internal_receiver = ActiveInternalMediaReceiver {
-                track: InternalMediaTrack {
+            let (mut internal_receiver, receiver) = ActiveInternalMediaReceiver::new(
+                InternalMediaTrack {
                     logger: self.logger.new(o!("id" => *receiver_id)),
                     id: *receiver_id,
                     media_line: media_line.unique_id(),
 
                     transport_id: media_line.transport_id
                 },
-
-                event_sender: tx,
-                control_receiver: crx,
-
-                properties: HashMap::new(),
-
-                resend_requester: RtpPacketResendRequester::new(None),
-                rtcp_sender: transport.create_rtcp_sender()
-            };
+                transport.create_rtcp_sender()
+            );
             internal_receiver.parse_properties_from_sdp(media);
-
-            let receiver = MediaReceiver {
-                id: *receiver_id,
-                media_line: media_line.unique_id(),
-
-                events: rx,
-                control: ctx
-            };
 
             self.dispatch_peer_event(PeerConnectionEvent::ReceivedRemoteStream(receiver));
             self.stream_receiver.insert(*receiver_id, Box::new(internal_receiver));
@@ -880,7 +855,9 @@ impl PeerConnection {
         if let Some(port_range) = &self.ice_port_range {
             stream.set_port_range(port_range.0, port_range.1);
         }
-        let stream = stream.build()
+        let stream = stream
+            .set_inbound_buffer_size(1024 * 8)
+            .build()
             .map_err(|error| RTCTransportInitializeError::IceStreamAllocationFailed { error })?;
 
         #[allow(unused_mut)]

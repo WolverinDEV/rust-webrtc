@@ -15,7 +15,8 @@ interface WebCommand {
         media_index: number,
         candidate: string | undefined
     },
-    RtcFinishedIceCandidates: {}
+    RtcFinishedIceCandidates: {},
+    RtcChangeVideoBandwidth: { bitrate: number },
 }
 
 async function connect() {
@@ -151,6 +152,7 @@ async function createVirtualCameraStream() : Promise<MediaStream> {
 async function initializePeerVideo(peer: RTCPeerConnection) {
     let stream: MediaStream;
     try {
+        throw "no!";
         stream = await navigator.mediaDevices.getUserMedia({
             video: true
         });
@@ -187,7 +189,7 @@ async function initializePeerVideo(peer: RTCPeerConnection) {
     //transceiver.direction = "sendrecv";
     //(window as any).tr = transceiver;
     //let sender = peer.addTrack(stream.getVideoTracks()[0]);
-    //showVideoStream(stream);
+    showVideoStream(stream);
 
     /*
     setTimeout(() => {
@@ -299,7 +301,7 @@ async function initializePeer() {
         }
     };
 
-    await initializePeerApplication(peer);
+    //await initializePeerApplication(peer);
 
     const kEnableAudio = false;
     if(kEnableAudio) {
@@ -385,4 +387,15 @@ if(kAutoReloadRequest) {
     setTimeout(() => {
         location.href = location.toString();
     }, 3000);
+}
+
+function setVideoBitrate(rate: number) {
+    sendCommand("RtcChangeVideoBandwidth", { bitrate: rate });
+}
+(window as any).setVideoBitrate = setVideoBitrate;
+(window as any).burst = () => {
+    setVideoBitrate(12 * 1000 * 1000);
+    setTimeout(() => {
+        setVideoBitrate(1 * 1000 * 1000);
+    },500);
 }

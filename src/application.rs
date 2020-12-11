@@ -490,7 +490,7 @@ impl ChannelApplication {
             proto: SdpProtocolValue::DtlsSctp
         });
 
-        media.set_connection(SdpConnection{
+        let _ = media.set_connection(SdpConnection{
             address: ExplicitlyTypedAddress::Ip(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
             ttl: None,
             amount: None

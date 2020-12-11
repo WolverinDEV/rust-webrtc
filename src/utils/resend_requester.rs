@@ -147,7 +147,6 @@ impl RtpPacketResendRequester {
             /* new_packets is ideally 1 which means that we've received an in order packet */
             let new_packets = distance - self.pending_timestamps.len() + 1;
 
-            self.temp_lost_packets.clear();
             /* TODO: Add RTT here, else out of order packets are directly counted as loss */
             let expected_arrival_timestamp = self.current_timestamp() + self.nack_delay;
 
@@ -161,6 +160,7 @@ impl RtpPacketResendRequester {
             if !self.temp_lost_packets.is_empty() {
                 let _ = self.events.0.send(RtpPacketResendRequesterEvent::PacketTimedOut(self.temp_lost_packets.clone()));
                 self.temp_lost_packets.truncate(LOST_PACKETS_TMP_BUFFER_LENGTH);
+                self.temp_lost_packets.clear();
             }
 
             self.pending_index = self.pending_index + new_packets as u16;
@@ -215,8 +215,6 @@ impl RtpPacketResendRequester {
         let mut index = self.pending_timestamp_index;
         let mut packet_index = self.pending_index;
 
-        self.temp_lost_packets.clear();
-
         loop {
             if self.pending_timestamps[index] != 0xFFFFFFFF {
                 self.pending_timestamps[index] = 0xFFFFFFFF; /* mark slot as received */
@@ -231,6 +229,7 @@ impl RtpPacketResendRequester {
         if emit_lost && !self.temp_lost_packets.is_empty() {
             let _ = self.events.0.send(RtpPacketResendRequesterEvent::PacketTimedOut(self.temp_lost_packets.clone()));
             self.temp_lost_packets.truncate(LOST_PACKETS_TMP_BUFFER_LENGTH);
+            self.temp_lost_packets.clear();
         }
     }
 
@@ -239,9 +238,6 @@ impl RtpPacketResendRequester {
             /* nothing to do, we've already scheduled a resend */
             return;
         }
-
-        self.temp_resend_packets.clear();
-        self.temp_lost_packets.clear();
 
         let mut index = self.pending_timestamp_index;
         let mut packet_index = self.pending_index;
@@ -271,11 +267,13 @@ impl RtpPacketResendRequester {
         if !self.temp_lost_packets.is_empty() {
             let _ = self.events.0.send(RtpPacketResendRequesterEvent::PacketTimedOut(self.temp_lost_packets.clone()));
             self.temp_lost_packets.truncate(LOST_PACKETS_TMP_BUFFER_LENGTH);
+            self.temp_lost_packets.clear();
         }
 
         if !self.temp_resend_packets.is_empty() {
             let _ = self.events.0.send(RtpPacketResendRequesterEvent::ResendPackets(self.temp_resend_packets.clone()));
             self.temp_resend_packets.truncate(RESEND_PACKETS_TMP_BUFFER_LENGTH);
+            self.temp_resend_packets.clear();
             /* TODO: Use RTT */
             self.resend_delay = Some(tokio::time::delay_for(Duration::from_millis(self.resend_request_interval as u64)));
         } else if next_minimal_expected_time != 0xFFFFFFFF {

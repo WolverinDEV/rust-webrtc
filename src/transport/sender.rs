@@ -33,7 +33,7 @@ impl SenderBase {
     /// Try to write data to the transport, returns true if succeeded
     pub fn write_data(&mut self, data: &[u8]) -> bool {
         /*
-        if rand::random::<u8>() < 90 {
+        if rand::random::<u8>() < 8 {
             println!("Droppign RTP/RTCP");
             return true;
         }
@@ -103,9 +103,12 @@ impl RtpSender {
     }
 
     /// Retransmit a RTP packet
-    pub fn retransmit_rtp(&mut self, sequence_no: u16) {
+    pub fn retransmit_rtp(&mut self, sequence_no: u16) -> bool {
         if let Some(buffer) = self.history.resend_packet(sequence_no) {
             self.base.write_data(buffer);
+            true
+        } else {
+            false
         }
     }
 

@@ -5,6 +5,7 @@
 
 /* for std::intrinsics::breakpoint() */
 #![feature(core_intrinsics)]
+#![feature(slice_fill)]
 #![recursion_limit = "128"]
 
 use crate::srtp2::srtp2_global_init;

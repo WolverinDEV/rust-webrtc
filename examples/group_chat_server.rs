@@ -7,8 +7,8 @@ use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 
 extern crate webrtc_lib;
-use webrtc_sdp::parse_sdp;
-use webrtc_sdp::attribute_type::{SdpAttribute, SdpAttributeRtcpFbType};
+use webrtc_sdp::{parse_sdp, SdpBandwidth};
+use webrtc_sdp::attribute_type::{SdpAttribute, SdpAttributeRtcpFbType, SdpAttributeFmtpParameters};
 use std::sync::{Arc, Mutex};
 use std::ops::{DerefMut};
 use std::str::FromStr;
@@ -32,6 +32,8 @@ use webrtc_lib::utils::rtcp::packets::{RtcpPayloadFeedback, RtcpPacketPayloadFee
 use webrtc_lib::utils::rtcp::RtcpPacket;
 use webrtc_lib::{initialize_webrtc, rtc};
 use slog::{ o, Drain };
+use std::io::{ Cursor };
+use byteorder::{WriteBytesExt, BigEndian};
 
 mod shared;
 mod video;
@@ -85,6 +87,7 @@ impl Default for ClientData {
             .logger(logger)
             .event_loop(event_context)
             .dispatch_all_packets(true)
+            //.ice_udp(false)
             .create().expect("failed to create peer connection");
 
         ClientData {
@@ -242,12 +245,11 @@ fn broadcast_client_media(client: Arc<Mutex<Client<ClientData>>>, locked_client:
                     MediaReceiverEvent::DataLost(ids) => {
                         println!("Audio data lost: {:?}", ids);
                     },
-                    MediaReceiverEvent::RtcpPacketReceived(packet) => {
-                        println!("Received RTCP packet for audio stream: {:?}", packet);
-                    },
                     MediaReceiverEvent::ByeSignalReceived(reason) => {
                         println!("Received bye signal for audio stream with reason {:?}", reason);
-                    }
+                    },
+                    MediaReceiverEvent::ReceiverActivated => {},
+                    MediaReceiverEvent::BandwidthLimitViolation(_) => {}
                 }
             }
         }
@@ -256,7 +258,7 @@ fn broadcast_client_media(client: Arc<Mutex<Client<ClientData>>>, locked_client:
             let mut receiver = RefCell::borrow_mut(&receiver);
             if request_pli {
                 receiver.reset_pending_resends();
-                let id = receiver.id;
+                let id = receiver.ssrc();
                 let _ = receiver.send_control(&RtcpPacket::PayloadFeedback(RtcpPacketPayloadFeedback{
                     ssrc: 1,
                     media_ssrc: id,
@@ -282,12 +284,11 @@ fn broadcast_client_media(client: Arc<Mutex<Client<ClientData>>>, locked_client:
                     MediaReceiverEvent::DataLost(ids) => {
                         println!("Video data lost: {:?}", ids);
                     },
-                    MediaReceiverEvent::RtcpPacketReceived(packet) => {
-                        println!("Received RTCP packet for video stream: {:?}", packet);
-                    },
                     MediaReceiverEvent::ByeSignalReceived(reason) => {
                         println!("Received bye signal for video stream with reason {:?}", reason);
-                    }
+                    },
+                    MediaReceiverEvent::ReceiverActivated => {},
+                    MediaReceiverEvent::BandwidthLimitViolation(_) => {}
                 }
             }
         }
@@ -345,19 +346,24 @@ fn execute_client_peer(client: Arc<Mutex<Client<ClientData>>>, locked_client: &m
                         });
                     }
                 },
-                PeerConnectionEvent::ReceivedRemoteStream(receiver) => {
+                PeerConnectionEvent::ReceivedRemoteStream(mut receiver) => {
                     let mut locked_client = client.lock().unwrap();
                     let peer = &mut locked_client.data.peer;
                     let media_line = peer.media_lines().iter()
-                        .find(|line| RefCell::borrow(line).unique_id() == receiver.media_line)
+                        .find(|line| RefCell::borrow(line).unique_id() == receiver.media_line())
                         .map(|e| e.clone()).unwrap();
                     let media_line = RefCell::borrow(&media_line);
 
-                    println!("Received remote {} stream {}", media_line.media_type, receiver.id);
+                    println!("Received remote {} stream {}", media_line.media_type, receiver.ssrc());
                     let mut wake_broadcast = false;
                     match &media_line.media_type {
                         SdpMediaValue::Video => {
                             if locked_client.data.video_receiver.is_none() {
+                                let resend_requester = receiver.resend_requester_mut();
+                                resend_requester.set_resend_interval(50);
+                                resend_requester.set_nack_delay(10);
+                                resend_requester.set_frame_size(1024);
+
                                 locked_client.data.video_receiver = Some(Rc::new(RefCell::new(receiver)));
                                 wake_broadcast = true;
                             }
@@ -400,6 +406,31 @@ fn execute_client_peer(client: Arc<Mutex<Client<ClientData>>>, locked_client: &m
     }, abort_registration));
 }
 
+const DEFAULT_FMTP_PARAMETERS: SdpAttributeFmtpParameters = SdpAttributeFmtpParameters{
+    packetization_mode: 0,
+    level_asymmetry_allowed: false,
+    profile_level_id: 0x0042_0010,
+    max_fs: 0,
+    max_cpb: 0,
+    max_dpb: 0,
+    max_br: 0,
+    max_mbps: 0,
+    usedtx: false,
+    stereo: false,
+    useinbandfec: false,
+    cbr: false,
+    max_fr: 0,
+    maxplaybackrate: 48000,
+    maxaveragebitrate: 0,
+    ptime: 0,
+    minptime: 0,
+    maxptime: 0,
+    encodings: Vec::new(),
+    dtmf_tones: String::new(),
+    rtx: None,
+    unknown_tokens: Vec::new(),
+};
+
 fn send_local_description(command_pipe: &mut mpsc::UnboundedSender<WebCommand>, peer: &mut PeerConnection, mode: String) -> std::result::Result<(), String> {
     for line in peer.media_lines() {
         let mut line = RefCell::borrow_mut(line);
@@ -414,6 +445,7 @@ fn send_local_description(command_pipe: &mut mpsc::UnboundedSender<WebCommand>, 
                         feedback: vec![
                             CodecFeedback{ feedback_type: SdpAttributeRtcpFbType::Nack, parameter: String::new(), extra: String::new() },
                             CodecFeedback{ feedback_type: SdpAttributeRtcpFbType::Nack, parameter: String::from("pli"), extra: String::new() },
+                            CodecFeedback{ feedback_type: SdpAttributeRtcpFbType::Remb, parameter: String::new(), extra: String::new() },
                         ],
                         channels: None,
                         parameters: None
@@ -433,7 +465,13 @@ fn send_local_description(command_pipe: &mut mpsc::UnboundedSender<WebCommand>, 
         }
     }
 
-    let answer = peer.create_local_description().map_err(|err| format!("{:?}", err))?;
+    let mut answer = peer.create_local_description().map_err(|err| format!("{:?}", err))?;
+    for line in answer.media.iter_mut() {
+        if line.get_type() == &SdpMediaValue::Video {
+            line.add_bandwidth(SdpBandwidth::Tias(50_000_000));
+        }
+    }
+
     println!("Sending {}: {:?}", mode, answer.to_string());
     let _ = command_pipe.send(WebCommand::RtcSetRemoteDescription { sdp: answer.to_string(), mode });
     Ok(())
@@ -460,6 +498,8 @@ fn handle_command(client: Arc<Mutex<Client<ClientData>>>, command: &WebCommand) 
                     RtcDescriptionType::Answer
                 }
             };
+
+            /*
             /* Testing media sender adding before the peer has been initialized */
             if mode == RtcDescriptionType::Offer {
                 let mut stream = locked_client.data.peer.create_media_sender(SdpMediaValue::Video);
@@ -477,6 +517,7 @@ fn handle_command(client: Arc<Mutex<Client<ClientData>>>, command: &WebCommand) 
                     Poll::Pending
                 }));
             }
+            */
 
             locked_client.data.peer.set_remote_description(&sdp, &mode).map_err(|err| format!("{:?}", err))?;
 
@@ -541,6 +582,16 @@ fn handle_command(client: Arc<Mutex<Client<ClientData>>>, command: &WebCommand) 
                 if let Err(err) = locked_client.data.peer.add_remote_ice_candidate(line, None) {
                     eprintln!("Failed to signal ICE finished: {:?}", err);
                 }
+            }
+        },
+        WebCommand::RtcChangeVideoBandwidth { bitrate } => {
+            if let Some(receiver) = locked_client.data.video_receiver.as_ref() {
+                let mut receiver = RefCell::borrow_mut(receiver);
+
+                receiver.set_bandwidth_limit(Some(*bitrate));
+                let stats = receiver.statistics();
+                //println!("Stats: {:?}", stats);
+                println!("Payload: Second: {}, Minute: {}; Header: Second: {}, Minute: {}", stats.bandwidth_payload_second(), stats.bandwidth_payload_minute(), stats.bandwidth_header_second(), stats.bandwidth_header_minute());
             }
         }
     }

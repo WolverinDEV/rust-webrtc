@@ -22,7 +22,7 @@ use std::rc::Rc;
 use serde::export::Formatter;
 use std::ops::Deref;
 use crate::srtp2::{Srtp2, Srtp2ErrorCode};
-use crate::utils::rtp::is_rtp_header;
+use crate::utils::rtp::{is_rtp_header, ParsedRtpPacket};
 use crate::utils::rtcp::is_rtcp_header;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -608,17 +608,19 @@ impl RTCTransport {
             self.dtls_buffer.borrow_mut().read_buffer.push_back(data);
         } else if is_rtp_header(data.as_slice()) {
             if let Some(srtp) = &self.srtp_in {
-                match srtp.unprotect(data.as_mut_slice()) {
-                    Ok(len) => {
-                        data.truncate(len);
+                //let parsed = rtp_rs::RtpReader::new(data.as_slice())
+                //    .expect("does htis work?");
+                //slog_trace!(self.logger, "SRTP-IN: {:?}", parsed.sequence_number());
+                let (length, result) = srtp.unprotect(data.as_mut_slice());
+                match result {
+                    Srtp2ErrorCode::Ok |
+                    Srtp2ErrorCode::ReplayFail |
+                    Srtp2ErrorCode::ReplayOld => {
+                        data.truncate(length);
                         return Some(RTCTransportEvent::MessageReceivedRtp(data));
                     },
-                    Err(err) => {
-                        if err == Srtp2ErrorCode::ReplayFail {
-                            /* we've probably re-requested the packet twice */
-                        } else {
-                            slog_trace!(self.logger, "Failed to unprotect rtp packet: {:?}", err);
-                        }
+                    err => {
+                        slog_trace!(self.logger, "Failed to unprotect rtp packet: {:?}", err);
                     }
                 }
             } else {
@@ -626,12 +628,15 @@ impl RTCTransport {
             }
         } else if is_rtcp_header(data.as_slice()) {
             if let Some(srtp) = &self.srtp_in {
-                match srtp.unprotect_rtcp(data.as_mut_slice()) {
-                    Ok(len) => {
-                        data.truncate(len);
+                let (length, result) = srtp.unprotect_rtcp(data.as_mut_slice());
+                match result {
+                    Srtp2ErrorCode::Ok |
+                    Srtp2ErrorCode::ReplayFail |
+                    Srtp2ErrorCode::ReplayOld => {
+                        data.truncate(length);
                         return Some(RTCTransportEvent::MessageReceivedRtcp(data));
                     },
-                    Err(err) => {
+                    err => {
                         slog_trace!(self.logger, "Failed to unprotect rtcp packet: {:?}", err);
                     }
                 }

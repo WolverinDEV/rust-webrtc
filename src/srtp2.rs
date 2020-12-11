@@ -138,29 +138,30 @@ impl Srtp2 {
     /// Unprotect a rtp packet.
     /// The return value will hold the packet length in bytes.
     /// The buffer must be 32 bit aligned (else it's an invalid packet).
-    pub fn unprotect(&self, buffer: &mut [u8]) -> Result<usize, Srtp2ErrorCode> {
+    pub fn unprotect(&self, buffer: &mut [u8]) -> (usize, Srtp2ErrorCode) {
         let mut length = buffer.len() as c_int;
-        Srtp2ErrorCode::from(unsafe {
+
+        let code = Srtp2ErrorCode::from(unsafe {
             ffi::srtp_unprotect(self.state, buffer.as_mut_ptr() as *mut c_void, &mut length)
-        }).success()?;
+        });
 
         assert!(length >= 0);
-        Ok(length as usize)
+        (length as usize, code)
     }
 
 
     /// Unprotect a rtcp packet.
     /// The return value will hold the packet length in bytes.
     /// The buffer must be 32 bit aligned (else it's an invalid packet).
-    pub fn unprotect_rtcp(&self, buffer: &mut [u8]) -> Result<usize, Srtp2ErrorCode> {
+    pub fn unprotect_rtcp(&self, buffer: &mut [u8]) -> (usize, Srtp2ErrorCode) {
         let mut length = buffer.len() as c_int;
-        Srtp2ErrorCode::from(unsafe {
+        let code = Srtp2ErrorCode::from(unsafe {
             ffi::srtp_unprotect_rtcp(self.state, buffer.as_mut_ptr() as *mut c_void, &mut length)
-        }).success()?;
+        });
 
         //length *= 4;
         assert!(length >= 0);
-        Ok(length as usize)
+        (length as usize, code)
     }
 
     /// Protect a rtp packet.

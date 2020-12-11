@@ -238,5 +238,6 @@ impl<ClientData: Default + Unpin> Stream for Client<ClientData> {
 pub enum WebCommand {
     RtcSetRemoteDescription { sdp: String, mode: String },
     RtcAddIceCandidate { media_index: usize, candidate: String },
-    RtcFinishedIceCandidates { }
+    RtcFinishedIceCandidates { },
+    RtcChangeVideoBandwidth { bitrate: u32, }
 }
