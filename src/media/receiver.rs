@@ -219,7 +219,7 @@ impl Stream for MediaReceiver {
                     return Poll::Ready(Some(MediaReceiverEvent::BandwidthLimitViolation(received_bandwidth)));
                 }
 
-                println!("Bandwidth Payload: Minute: {} Bps Second: {}Bps ", received_bandwidth * 8 as f64, self.statistics.bandwidth_payload_second() * 8);
+                slog_trace!(self.logger, "Bandwidth Payload: Minute: {} Bps Second: {}Bps ", received_bandwidth * 8 as f64, self.statistics.bandwidth_payload_second() * 8);
             }
         }
 
