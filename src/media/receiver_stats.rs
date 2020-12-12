@@ -111,10 +111,13 @@ impl ReceiverStats {
     }
 
     pub(crate) fn reset(&mut self) {
-
+        self.reset_bandwidth();
+        self.initialized = false;
+        self.highest_sequence_received = 0;
+        self.highest_sequence_timestamp = 0;
     }
 
-    pub(crate) fn reset_bandwith(&mut self) {
+    pub(crate) fn reset_bandwidth(&mut self) {
         self.bandwidth_payload_history.fill(0);
         self.bandwidth_header_history.fill(0);
     }

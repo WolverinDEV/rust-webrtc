@@ -159,7 +159,7 @@ impl MediaReceiver {
             feedback: RtcpPayloadFeedback::ApplicationSpecific(buffer[0..buffer_length as usize].to_vec())
         }));
 
-        self.statistics.reset_bandwith();
+        self.statistics.reset_bandwidth();
     }
 }
 
