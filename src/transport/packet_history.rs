@@ -24,7 +24,7 @@ pub struct RtpPacketHistory {
     current_byte_count: usize,
     packets: VecDeque<Box<RtpSendPacket>>,
 
-    cleanup_interval: tokio::time::Interval
+    cleanup_interval: Option<tokio::time::Interval>
 }
 
 impl RtpPacketHistory {
@@ -46,7 +46,7 @@ impl RtpPacketHistory {
             current_byte_count: 0,
             packets: VecDeque::with_capacity(1000),
 
-            cleanup_interval: tokio::time::interval(Duration::from_secs(1))
+            cleanup_interval: None
         }
     }
 
@@ -117,7 +117,11 @@ impl Future for RtpPacketHistory {
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if let Poll::Ready(_) = self.cleanup_interval.poll_next_unpin(cx) {
+        if self.cleanup_interval.is_none() {
+            self.cleanup_interval = Some(tokio::time::interval(Duration::from_secs(1)));
+        }
+
+        if let Poll::Ready(_) = self.cleanup_interval.as_mut().unwrap().poll_next_unpin(cx) {
             self.cleanup()
         }
         Poll::Pending
