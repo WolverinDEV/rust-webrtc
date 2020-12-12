@@ -208,6 +208,7 @@ impl Stream for MediaReceiver {
         }
 
         while let Poll::Ready(Some(_)) = self.timer_bandwidth_watcher.as_mut().unwrap().poll_next_unpin(cx) {
+            self.statistics.tick();
             if let Some(max_bandwidth) = self.bandwidth_limit {
                 let received_bandwidth = self.statistics.bandwidth_payload_minute();
                 if received_bandwidth as u32 * 8 > max_bandwidth {

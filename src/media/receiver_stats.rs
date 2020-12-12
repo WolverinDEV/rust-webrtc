@@ -91,6 +91,25 @@ impl ReceiverStats {
         self.bandwidth_second(&self.bandwidth_payload_history[..])
     }
 
+    fn advance_history(&mut self, current_seconds: u64) -> usize {
+        let bandwidth_index = (current_seconds as u32 % HISTORY_TIME_SPAN as u32) as usize;
+        while self.bandwidth_current_index != bandwidth_index {
+            self.bandwidth_current_index += 1;
+
+            if self.bandwidth_current_index >= HISTORY_TIME_SPAN {
+                self.bandwidth_current_index = 0;
+            }
+
+            self.bandwidth_header_history[self.bandwidth_current_index] = 0;
+            self.bandwidth_payload_history[self.bandwidth_current_index] = 0;
+        }
+        bandwidth_index
+    }
+
+    pub fn tick(&mut self) {
+        self.advance_history(self.current_seconds());
+    }
+
     pub(crate) fn reset(&mut self) {
 
     }
@@ -114,20 +133,9 @@ impl ReceiverStats {
 
         self.initialized = true;
 
-        let bandwidth_index = (current_seconds as u32 % HISTORY_TIME_SPAN as u32) as usize;
-        while self.bandwidth_current_index != bandwidth_index {
-            self.bandwidth_current_index += 1;
-
-            if self.bandwidth_current_index >= HISTORY_TIME_SPAN {
-                self.bandwidth_current_index = 0;
-            }
-
-            self.bandwidth_header_history[self.bandwidth_current_index] = 0;
-            self.bandwidth_payload_history[self.bandwidth_current_index] = 0;
-        }
-
-        self.bandwidth_header_history[self.bandwidth_current_index] += header_length;
-        self.bandwidth_payload_history[self.bandwidth_current_index] += payload_length;
+        let bandwidth_index = self.advance_history(current_seconds);
+        self.bandwidth_header_history[bandwidth_index] += header_length;
+        self.bandwidth_payload_history[bandwidth_index] += payload_length;
     }
 
     fn current_seconds(&self) -> u64 {
