@@ -383,6 +383,11 @@ impl RTCTransport {
     }
 
     pub fn apply_remote_description(&mut self, _media_line: u32, media: &SdpMedia) -> Result<(), RTCTransportDescriptionApplyError> {
+        if media.get_attribute(SdpAttributeType::Inactive).is_some() {
+            /* Nothing to do. */
+            return Ok(());
+        }
+
         if media.get_attribute(SdpAttributeType::RtcpMux).is_none() && media.get_type() != &SdpMediaValue::Application {
             /* We're currently only supporting RtcpMux */
             return Err(RTCTransportDescriptionApplyError::MissingRtcpMux);
