@@ -65,8 +65,13 @@ impl SenderBase {
         }
 
         return if let Some(backend) = self.backend.lock().unwrap().as_mut() {
-            backend.srtp.protect(buffer, payload_length)
-                .map_err(|err| PacketProtectError::ErrorProtect(err))
+            let (length, error) = backend.srtp.protect(buffer, payload_length);
+            match error {
+                Srtp2ErrorCode::Ok |
+                Srtp2ErrorCode::ReplayFail |
+                Srtp2ErrorCode::ReplayOld => Ok(length),
+                error => PacketProtectError::ErrorProtect(error)
+            }
         } else {
             Err(PacketProtectError::BackendMissing)
         }
@@ -78,8 +83,13 @@ impl SenderBase {
         }
 
         return if let Some(backend) = self.backend.lock().unwrap().as_mut() {
-            backend.srtp.protect_rtcp(buffer, payload_length)
-                .map_err(|err| PacketProtectError::ErrorProtect(err))
+            let (length, error) = backend.srtp.protect_rtcp(buffer, payload_length);
+            match error {
+                Srtp2ErrorCode::Ok |
+                Srtp2ErrorCode::ReplayFail |
+                Srtp2ErrorCode::ReplayOld => Ok(length),
+                error => PacketProtectError::ErrorProtect(error)
+            }
         } else {
             Err(PacketProtectError::BackendMissing)
         }
