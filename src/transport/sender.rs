@@ -70,7 +70,7 @@ impl SenderBase {
                 Srtp2ErrorCode::Ok |
                 Srtp2ErrorCode::ReplayFail |
                 Srtp2ErrorCode::ReplayOld => Ok(length),
-                error => PacketProtectError::ErrorProtect(error)
+                error => Err(PacketProtectError::ErrorProtect(error))
             }
         } else {
             Err(PacketProtectError::BackendMissing)
@@ -88,7 +88,7 @@ impl SenderBase {
                 Srtp2ErrorCode::Ok |
                 Srtp2ErrorCode::ReplayFail |
                 Srtp2ErrorCode::ReplayOld => Ok(length),
-                error => PacketProtectError::ErrorProtect(error)
+                error => Err(PacketProtectError::ErrorProtect(error))
             }
         } else {
             Err(PacketProtectError::BackendMissing)
