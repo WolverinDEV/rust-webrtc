@@ -12,7 +12,7 @@ WebRTC-Rust is a WebRTC implementation in Rust, depending on `libnice`, `srtp` a
     - Automatically respond to retransmission request from the peer (Using nack)
   - Incoming (Receiving)
     - Receive audio and video data
-    - Automatically request lost packets
+    - Automatically request lost packets (via generic NACKs)
 - Full session renegotiation support
 - Full control of received and send data
 - No unwanted overhead (e.g. Video de/encoders)
@@ -22,15 +22,16 @@ WebRTC-Rust is a WebRTC implementation in Rust, depending on `libnice`, `srtp` a
 Install OpenSSL via vcpkg: `vcpkg install openssl:x64-windows-static-md`
 
 Required libraries:
-- ffi-7.dll
-- gio-2.0-0.ddl
-- glib-2.0-0.dll
-- gmodule-2.0-0.dll
-- gobject-2.0-0.dll
-- intl.dll
-- nice-10.ddl
-- srtp2-1.dll
-- usrsctp-1.dll
+- ffi-7.dll  (in libnice)
+- gio-2.0-0.ddl (in libnice)
+- glib-2.0-0.dll (in libnice)
+- gmodule-2.0-0.dll (in libnice)
+- gobject-2.0-0.dll (in libnice)
+- intl.dll (in libnice)
+- nice-10.dll (in libnice)
+- srtp2-1.dll (in srtp2)
+- usrsctp-1.dll (in usrsctp)
+- z.dll (in libnice)
 
 # Todos
 ## Application channels (DataChannel)  

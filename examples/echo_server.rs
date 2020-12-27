@@ -26,6 +26,7 @@ use webrtc_lib::utils::rtcp::packets::{RtcpPacketPayloadFeedback, RtcpPayloadFee
 use futures::future::{Abortable, AbortHandle};
 use crate::shared::execute_example;
 use webrtc_lib::sctp::message::DataChannelType;
+use slog::{ Drain };
 
 mod shared;
 mod video;
@@ -114,7 +115,10 @@ async fn execute_client(mut client: Client<ClientData>) {
 }
 
 fn main() {
-    initialize_webrtc();
+    let decorator = slog_term::PlainSyncDecorator::new(std::io::stdout());
+    let drain = slog_term::FullFormat::new(decorator).build().fuse();
+    let logger = slog::Logger::root(drain, slog::o!("global-logger" => 1));
+    initialize_webrtc(logger);
 
     execute_example(execute_client);
 }
@@ -122,8 +126,18 @@ fn main() {
 fn spawn_client_peer(client: &mut Client<ClientData>) {
     assert!(client.data.peer.is_none());
 
+    let decorator = slog_term::PlainSyncDecorator::new(std::io::stdout());
+    let drain = slog_term::FullFormat::new(decorator).build().fuse();
+    /* FIXME: Generate a client id */
+    let logger = slog::Logger::root(drain, slog::o!("client-id" => 0));
+
     println!("Creating a new peer");
-    let peer = Arc::new(Mutex::new(rtc::PeerConnection::new(client.data.event_loop.clone().unwrap().get_context())));
+    let peer = rtc::PeerConnection::builder()
+        .event_loop(client.data.event_loop.clone().unwrap().get_context())
+        .logger(logger)
+        .create().expect("Failed to create peer");
+
+    let peer = Arc::new(Mutex::new(peer));
     client.data.peer = Some(peer.clone());
 
     let video_stream = client.data.video_sender.clone();
@@ -161,7 +175,7 @@ fn spawn_client_peer(client: &mut Client<ClientData>) {
                     }
                 },
                 PeerConnectionEvent::ReceivedRemoteStream(receiver) => {
-                    println!("Received remote stream {}", receiver.id);
+                    println!("Received remote stream {}", receiver.ssrc());
 
                     let video_stream = video_stream.clone();
                     tokio::spawn(async move {
@@ -171,7 +185,7 @@ fn spawn_client_peer(client: &mut Client<ClientData>) {
                             receiver = receiver_;
 
                             if message.is_none() {
-                                println!("Remote stream {} closed", receiver.id);
+                                println!("Remote stream {} closed", receiver.ssrc());
                                 break;
                             }
 
@@ -187,15 +201,15 @@ fn spawn_client_peer(client: &mut Client<ClientData>) {
                                             stream.request_pli = false;
                                             receiver.reset_pending_resends();
                                             let _ = receiver.send_control(&RtcpPacket::PayloadFeedback(RtcpPacketPayloadFeedback{
-                                                ssrc: stream.sender.id,
-                                                media_ssrc: receiver.id,
+                                                ssrc: stream.sender.id(),
+                                                media_ssrc: receiver.ssrc(),
                                                 feedback: RtcpPayloadFeedback::PictureLossIndication
                                             }));
                                         }
                                     }
                                 },
                                 _ => {
-                                    println!("Remote stream {} received: {:?}", receiver.id, message);
+                                    println!("Remote stream {} received: {:?}", receiver.ssrc(), message);
                                 }
                             }
                         }
@@ -351,6 +365,9 @@ fn handle_command(client: &mut Client<ClientData>, command: &WebCommand) -> std:
                     eprintln!("Failed to signal ICE finished: {:?}", err);
                 }
             }
+        },
+        WebCommand::RtcChangeVideoBandwidth{ .. } => {
+            /* No supported right now */
         }
     }
 
