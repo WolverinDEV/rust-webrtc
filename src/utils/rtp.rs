@@ -1,8 +1,7 @@
 use std::pin::Pin;
 use rtp_rs::RtpReaderError;
 use std::ops::Deref;
-use std::fmt::Debug;
-use serde::export::Formatter;
+use std::fmt::{Debug, Formatter};
 
 /// Returns true if the buffer seem to contain a RTP header
 pub fn is_rtp_header(buffer: &[u8]) -> bool {
