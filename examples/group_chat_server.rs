@@ -215,7 +215,13 @@ fn broadcast_client_media(client: Arc<Mutex<Client<ClientData>>>, locked_client:
                         } else {
                             println!("Video sender channel PayloadFeedbackReceived: {:?}", fb);
                         }
-                    }
+                    },
+                    MediaSenderEvent::TransportFeedbackReceived(feedback) => {
+                        /* will already be handled */
+                    },
+                    MediaSenderEvent::ReceiverReportReceived(rr) => {
+                        /* will already be handled */
+                    },
                     _ => {
                         println!("Video sender channel event: {:?}", event);
                     }
@@ -238,7 +244,7 @@ fn broadcast_client_media(client: Arc<Mutex<Client<ClientData>>>, locked_client:
                         for sender in locked_client.data.audio_senders.iter_mut() {
                             if let Some(sender) = sender.as_mut() {
                                 *sender.payload_type_mut() = data.payload_type(); /* TODO: Don't do this. Since we're only accepting VP8/opus it should have already been set */
-                                sender.send(data.payload(), data.mark(), data.timestamp(), None);
+                                sender.send_seq(data.payload(), data.sequence_number().into(), data.mark(), data.timestamp(), None);
                             }
                         }
                     },
@@ -277,7 +283,7 @@ fn broadcast_client_media(client: Arc<Mutex<Client<ClientData>>>, locked_client:
                         for sender in locked_client.data.video_senders.iter_mut() {
                             if let Some(sender) = sender.as_mut() {
                                 *sender.payload_type_mut() = data.payload_type(); /* TODO: Don't do this. Since we're only accepting VP8/opus it should have already been set */
-                                sender.send(data.payload(), data.mark(), data.timestamp(), None);
+                                sender.send_seq(data.payload(), data.sequence_number().into(), data.mark(), data.timestamp(), None);
                             }
                         }
                     },
@@ -363,6 +369,7 @@ fn execute_client_peer(client: Arc<Mutex<Client<ClientData>>>, locked_client: &m
                                 resend_requester.set_resend_interval(50);
                                 resend_requester.set_nack_delay(10);
                                 resend_requester.set_frame_size(1024);
+                                receiver.set_bandwidth_limit(Some(4_000_000));
 
                                 locked_client.data.video_receiver = Some(Rc::new(RefCell::new(receiver)));
                                 wake_broadcast = true;
@@ -439,9 +446,9 @@ fn send_local_description(command_pipe: &mut mpsc::UnboundedSender<WebCommand>, 
                 SdpMediaValue::Application => {},
                 SdpMediaValue::Video => {
                     line.register_local_codec(Codec{
-                        payload_type: 96,
+                        payload_type: 105,
                         frequency: 90_000,
-                        codec_name: String::from("VP8"),
+                        codec_name: String::from("H264"),
                         feedback: vec![
                             CodecFeedback{ feedback_type: SdpAttributeRtcpFbType::Nack, parameter: String::new(), extra: String::new() },
                             CodecFeedback{ feedback_type: SdpAttributeRtcpFbType::Nack, parameter: String::from("pli"), extra: String::new() },

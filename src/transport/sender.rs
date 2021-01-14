@@ -33,7 +33,7 @@ impl SenderBase {
     /// Try to write data to the transport, returns true if succeeded
     pub fn write_data(&mut self, data: &[u8]) -> bool {
         /*
-        if rand::random::<u8>() < 8 {
+        if rand::random::<u8>() < 20 {
             println!("Droppign RTP/RTCP");
             return true;
         }

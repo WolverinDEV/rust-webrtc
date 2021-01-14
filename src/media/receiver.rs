@@ -2,15 +2,15 @@ use futures::{Stream, StreamExt, Future, FutureExt};
 use tokio::sync::mpsc;
 use futures::channel::oneshot;
 use crate::utils::rtp::ParsedRtpPacket;
-use crate::utils::rtcp::RtcpPacket;
+use crate::utils::rtcp::{RtcpPacket, RtcpReportBlock};
 use crate::transport::{RtcpSender};
 use futures::task::{Context, Poll};
 use tokio::macros::support::Pin;
 use crate::utils::{RtpPacketResendRequester, RtpPacketResendRequesterEvent};
-use crate::utils::rtcp::packets::{RtcpPacketTransportFeedback, RtcpTransportFeedback, RtcpPacketSenderReport, SourceDescription, RtcpPacketExtendedReport, RtcpPacketPayloadFeedback, RtcpPayloadFeedback};
+use crate::utils::rtcp::packets::{RtcpPacketTransportFeedback, RtcpTransportFeedback, RtcpPacketSenderReport, SourceDescription, RtcpPacketExtendedReport, RtcpPacketPayloadFeedback, RtcpPayloadFeedback, RtcpPacketReceiverReport};
 use crate::media::{InternalMediaTrack, ControlDataSendError, ReceiverStats};
 use webrtc_sdp::media_type::SdpMedia;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, VecDeque, BTreeMap};
 use std::collections::hash_map::RandomState;
 use slog::slog_trace;
 use std::io::Cursor;
@@ -194,7 +194,22 @@ impl Stream for MediaReceiver {
                         feedback: RtcpTransportFeedback::create_generic_nack(packets.as_slice())
                     };
 
+                    let mut reports = RtcpPacketReceiverReport{
+                        ssrc: self.ssrc(),
+                        profile_data: None,
+                        reports: BTreeMap::new()
+                    };
+                    reports.reports.insert(self.ssrc(), RtcpReportBlock{
+                        highest_sequence_received: self.resend_requester.last_packet_id() as u32,
+                        cumulative_packets_lost: 0,
+                        delay_since_last_sr: 0,
+                        fraction_lost: 0,
+                        jitter: 0,
+                        timestamp_last_sr: 0
+                    });
+
                     slog_trace!(self.logger, "Requesting packet resend for {} {:?}", self.ssrc(), packets.iter().map(|e| e.packet_id).collect::<Vec<_>>());
+                    //self.rtcp_sender.send(&RtcpPacket::ReceiverReport(reports));
                     self.rtcp_sender.send(&RtcpPacket::TransportFeedback(feedback));
                 },
                 _ => {

@@ -317,10 +317,10 @@ async function initializePeer() {
         offerToReceiveAudio: kEnableAudio,
         offerToReceiveVideo: kEnableVideo
     });
-    await peer.setLocalDescription(offer);
-
+    offer.sdp = patchLocalSdp(offer.sdp, "offer");
     console.log("[SDP] Offer:\n%s", offer.sdp);
-    sendCommand("RtcSetRemoteDescription", { sdp: patchLocalSdp(offer.sdp, "offer"), mode: "offer" });
+    await peer.setLocalDescription(offer);
+    sendCommand("RtcSetRemoteDescription", { sdp: offer.sdp, mode: "offer" });
 
     /* if something changes, signal it to the remote */
     peer.onnegotiationneeded = async () => {

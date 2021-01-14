@@ -112,6 +112,10 @@ impl RtpPacketResendRequester {
         self.pending_timestamps.iter_mut().for_each(|val| *val = 0xFFFFFFFF);
     }
 
+    pub fn last_packet_id(&self) -> u16 {
+        self.last_packet_id.packet_id
+    }
+
     pub fn reset_resends(&mut self) {
         self.resend_delay = None;
         self.flush_pending_packets(false);
