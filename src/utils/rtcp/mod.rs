@@ -221,7 +221,7 @@ impl RtcpPacket {
     }
 
     pub fn parse(buffer: &[u8]) -> Result<RtcpPacket> {
-        if buffer.legn() < 2 {
+        if buffer.len() < 2 {
             return Err(Error::new(ErrorKind::InvalidInput, "truncated packet"));
         }
 
