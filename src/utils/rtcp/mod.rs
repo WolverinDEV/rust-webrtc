@@ -211,9 +211,6 @@ impl RtcpPacket {
                 return Err(Error::new(ErrorKind::InvalidInput, "packet length invalid"));
             }
             reader.seek(SeekFrom::Current(length as i64 * 4))?;
-            if length == 0 {
-                panic!();
-            }
             let packet_end = packet_offset + length as usize * 4 + 4;
             packets[packet_count] = &buffer[packet_offset..packet_end];
             packet_count = packet_count + 1;
@@ -224,7 +221,7 @@ impl RtcpPacket {
     }
 
     pub fn parse(buffer: &[u8]) -> Result<RtcpPacket> {
-        if buffer.len() < 2 {
+        if buffer.legn() < 2 {
             return Err(Error::new(ErrorKind::InvalidInput, "truncated packet"));
         }
 
