@@ -30,10 +30,8 @@ use webrtc_lib::media::{Codec, MediaReceiver, MediaSender, MediaSenderEvent, Med
 use webrtc_lib::rtc::{PeerConnection, PeerConnectionEvent, RtcDescriptionType};
 use webrtc_lib::utils::rtcp::packets::{RtcpPayloadFeedback, RtcpPacketPayloadFeedback};
 use webrtc_lib::utils::rtcp::RtcpPacket;
-use webrtc_lib::{initialize_webrtc, rtc};
+use webrtc_lib::{rtc};
 use slog::{ o, Drain };
-use std::io::{ Cursor };
-use byteorder::{WriteBytesExt, BigEndian};
 
 mod shared;
 mod video;
@@ -216,10 +214,10 @@ fn broadcast_client_media(client: Arc<Mutex<Client<ClientData>>>, locked_client:
                             println!("Video sender channel PayloadFeedbackReceived: {:?}", fb);
                         }
                     },
-                    MediaSenderEvent::TransportFeedbackReceived(feedback) => {
+                    MediaSenderEvent::TransportFeedbackReceived(_feedback) => {
                         /* will already be handled */
                     },
-                    MediaSenderEvent::ReceiverReportReceived(rr) => {
+                    MediaSenderEvent::ReceiverReportReceived(_rr) => {
                         /* will already be handled */
                     },
                     _ => {
@@ -309,11 +307,6 @@ fn broadcast_client_media(client: Arc<Mutex<Client<ClientData>>>, locked_client:
 }
 
 fn main() {
-    let decorator = slog_term::PlainSyncDecorator::new(std::io::stdout());
-    let drain = slog_term::FullFormat::new(decorator).build().fuse();
-    let logger = slog::Logger::root(drain, o!("global-logger" => 1));
-    initialize_webrtc(logger);
-
     execute_example(execute_client);
 }
 

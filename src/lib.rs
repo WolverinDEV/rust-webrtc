@@ -12,6 +12,7 @@ use crate::srtp2::srtp2_global_init;
 use std::sync::{RwLock};
 use std::ops::Deref;
 use lazy_static::lazy_static;
+use crate::transport::crypt::certificate_cache;
 
 pub mod rtc;
 pub mod media;
@@ -25,23 +26,42 @@ lazy_static! {
     static ref GLOBAL_LOGGER: RwLock<Option<slog::Logger>> = RwLock::new(None);
 }
 
+/// Attention:
+/// This method must be called within the tokio runtime.
 pub fn initialize_webrtc(global_logger: slog::Logger) {
     // unsafe { libnice::sys::nice_debug_enable(1); }
     *GLOBAL_LOGGER.write().unwrap() = Some(global_logger);
     srtp2_global_init().expect("srtp2 init failed");
     openssl::init();
+
+    {
+        let mut certificate_cache = certificate_cache().lock().unwrap();
+        let init_future = certificate_cache.initialize();
+        drop(certificate_cache); /* else a deadlock would occur */
+
+        /* if this fails an error will already be printed */
+        let _ = tokio::runtime::Handle::current().block_on(init_future);
+    }
 }
 
 pub(crate) fn global_logger() -> slog::Logger {
-    if let Ok(locked) = GLOBAL_LOGGER.read() {
-        if let Some(logger) = locked.deref() {
-            logger.clone()
-        } else {
-            /* Fixme: Use fallback */
-            panic!("missing global logger")
+    match GLOBAL_LOGGER.read() {
+        Ok(locked) => {
+            if let Some(logger) = locked.deref() {
+                logger.clone()
+            } else {
+                /* Fixme: Use some kind of fallback */
+                panic!("missing global logger")
+            }
+        },
+        Err(error) => {
+            if let Some(logger) = error.into_inner().deref() {
+                slog::debug!(logger, "Recovered from poisoned global logger");
+                logger.clone()
+            } else {
+                /* Fixme: Use some kind of fallback */
+                panic!("missing global logger")
+            }
         }
-    } else {
-        /* FIXME: Unpoison */
-        panic!("global logger has been poisioned")
     }
 }

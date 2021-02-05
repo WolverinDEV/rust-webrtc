@@ -6,15 +6,11 @@ use futures::task::{Poll};
 use std::task::Context;
 use std::collections::{VecDeque};
 use futures::{StreamExt};
-use openssl::{ x509, pkey, rsa, ssl };
-use openssl::bn::BigNum;
+use openssl::ssl;
 use openssl::error::ErrorStack;
-use openssl::asn1::{Asn1Time};
-use openssl::hash::MessageDigest;
-use webrtc_sdp::attribute_type::{SdpAttributeFingerprintHashType, SdpAttributeFingerprint, SdpAttributeSetup, SdpAttribute, SdpAttributeType};
+use webrtc_sdp::attribute_type::{SdpAttributeFingerprint, SdpAttributeSetup, SdpAttribute, SdpAttributeType};
 use std::ffi::CString;
 use webrtc_sdp::address::Address;
-use openssl::ssl::{SslMethod};
 use std::io::{Read, Write};
 use futures::io::ErrorKind;
 use std::cell::RefCell;
@@ -26,6 +22,8 @@ use crate::utils::rtcp::is_rtcp_header;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 pub mod packet_history;
+pub(crate) mod crypt;
+
 use std::fmt::Formatter;
 mod sender;
 pub use sender::*;
@@ -41,6 +39,7 @@ use slog::{
     slog_debug,
     slog_error
 };
+use crate::transport::crypt::{certificate_cache};
 
 #[derive(Clone)]
 pub struct DebugableCandidate {
@@ -111,13 +110,14 @@ pub enum RTCTransportControl {
     SendMessage(Vec<u8>)
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum RTCTransportInitializeError {
     IceStreamAllocationFailed { error: BoolError },
     PrivateKeyGenFailed{ stack: ErrorStack },
     CertificateGenFailed{ stack: ErrorStack },
     FingerprintGenFailed{ stack: ErrorStack },
-    SslInitFailed { stack: ErrorStack }
+    SslInitFailed { stack: ErrorStack },
+    NoGeneratedCertificated
 }
 
 #[derive(Debug)]
@@ -219,89 +219,13 @@ pub struct RTCTransport {
 
 static TRANSPORT_ID_INDEX: AtomicU32 = AtomicU32::new(1);
 impl RTCTransport {
-    fn generate_ssl_components() -> Result<(SdpAttributeFingerprint, ssl::Ssl), RTCTransportInitializeError> {
-        let private_key = rsa::Rsa::generate_with_e(4096, &BigNum::from_u32(0x10001u32).unwrap())
-            .map_err(|stack| RTCTransportInitializeError::PrivateKeyGenFailed {stack})?;
-
-        let private_key = pkey::PKey::from_rsa(private_key)
-            .map_err(|stack| RTCTransportInitializeError::PrivateKeyGenFailed {stack})?;
-
-        let certificate = {
-            let subject = {
-                let mut builder = x509::X509NameBuilder::new().unwrap();
-                builder.append_entry_by_text("CN", "WebRTC - IMM")
-                    .map_err(|stack| RTCTransportInitializeError::CertificateGenFailed{ stack })?;
-                builder.build()
-            };
-
-            let mut cert_builder = x509::X509::builder()
-                .map_err(|stack| RTCTransportInitializeError::CertificateGenFailed{ stack })?;
-
-            cert_builder.set_pubkey(&private_key)
-                .map_err(|stack| RTCTransportInitializeError::CertificateGenFailed{ stack })?;
-
-            cert_builder.set_version(0)
-                .map_err(|stack| RTCTransportInitializeError::CertificateGenFailed{ stack })?;
-
-            cert_builder.set_subject_name(&subject)
-                .map_err(|stack| RTCTransportInitializeError::CertificateGenFailed{ stack })?;
-
-            cert_builder.set_issuer_name(&subject)
-                .map_err(|stack| RTCTransportInitializeError::CertificateGenFailed{ stack })?;
-
-            cert_builder.set_not_before(&Asn1Time::from_unix(0).unwrap())
-                .map_err(|stack| RTCTransportInitializeError::CertificateGenFailed{ stack })?;
-
-            cert_builder.set_not_after(&Asn1Time::days_from_now(14).unwrap())
-                .map_err(|stack| RTCTransportInitializeError::CertificateGenFailed{ stack })?;
-
-            cert_builder.sign(&private_key, MessageDigest::sha1())
-                .map_err(|stack| RTCTransportInitializeError::CertificateGenFailed{ stack })?;
-
-            cert_builder.build()
-        };
-
-        let fingerprint = {
-            let fingerprint = certificate.digest(MessageDigest::sha256())
-                .map_err(|stack| RTCTransportInitializeError::FingerprintGenFailed{ stack })?;
-
-            SdpAttributeFingerprint{
-                fingerprint: fingerprint.to_vec(),
-                hash_algorithm: SdpAttributeFingerprintHashType::Sha256
-            }
-        };
-
-        let ctx = {
-            let mut builder = ssl::SslContext::builder(SslMethod::dtls())
-                .map_err(|stack| RTCTransportInitializeError::SslInitFailed { stack })?;
-
-            builder.set_tlsext_use_srtp("SRTP_AES128_CM_SHA1_80:SRTP_AES128_CM_SHA1_32")
-                .map_err(|stack| RTCTransportInitializeError::SslInitFailed { stack })?;
-
-            builder.set_private_key(&private_key)
-                .map_err(|stack| RTCTransportInitializeError::SslInitFailed { stack })?;
-
-            builder.set_certificate(&certificate)
-                .map_err(|stack| RTCTransportInitializeError::SslInitFailed { stack })?;
-
-            builder.build()
-        };
-
-        let ssl = ssl::Ssl::new(&ctx)
-            .map_err(|stack| RTCTransportInitializeError::SslInitFailed { stack })?;
-
-        Ok((fingerprint, ssl))
-    }
-
     pub fn new(mut stream: libnice::ice::Stream,
                media_line: u32,
                parent_logger: &slog::Logger) -> Result<RTCTransport, RTCTransportInitializeError> {
         assert_eq!(stream.components().len(), 1, "expected only one stream component");
 
 
-        /* FIXME: Move the SSL part to the generate_local_description method so any other methods creating the transport don't experience an unexpected hangup (~200ms) */
-        let (fingerprint, ssl) = RTCTransport::generate_ssl_components()?;
-
+        let (ssl, fingerprint) = certificate_cache().lock().unwrap().generate_session_ssl()?;
         let dtls_stream = DtlsStreamSource{
             verbose: false ,
             read_buffer_offset: 0,

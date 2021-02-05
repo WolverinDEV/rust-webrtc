@@ -115,11 +115,6 @@ async fn execute_client(mut client: Client<ClientData>) {
 }
 
 fn main() {
-    let decorator = slog_term::PlainSyncDecorator::new(std::io::stdout());
-    let drain = slog_term::FullFormat::new(decorator).build().fuse();
-    let logger = slog::Logger::root(drain, slog::o!("global-logger" => 1));
-    initialize_webrtc(logger);
-
     execute_example(execute_client);
 }
 
@@ -248,7 +243,7 @@ fn spawn_client_peer(client: &mut Client<ClientData>) {
                                         } else if text == "create-dc" {
                                             if let Some(peer) = weak_peer.upgrade() {
                                                 let mut dc = peer.lock().unwrap().create_data_channel(DataChannelType::Reliable, String::from("xxx"), None, 1).unwrap();
-                                                dc.send_text_message(Some(String::from("Hey!")));
+                                                let _ = dc.send_text_message(Some(String::from("Hey!")));
                                             }
                                         }
                                         let _ = channel.send_text_message(Some(text));
