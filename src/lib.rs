@@ -45,7 +45,7 @@ pub fn initialize_webrtc(global_logger: slog::Logger) {
 }
 
 pub(crate) fn global_logger() -> slog::Logger {
-    let logger = GLOBAL_LOGGER.read().unwrap_or_else(|p| p.into_inner());
+    let locked = GLOBAL_LOGGER.read().unwrap_or_else(|p| p.into_inner());
     if let Some(logger) = locked.deref() {
         logger.clone()
     } else {
