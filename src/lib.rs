@@ -45,23 +45,11 @@ pub fn initialize_webrtc(global_logger: slog::Logger) {
 }
 
 pub(crate) fn global_logger() -> slog::Logger {
-    match GLOBAL_LOGGER.read() {
-        Ok(locked) => {
-            if let Some(logger) = locked.deref() {
-                logger.clone()
-            } else {
-                /* Fixme: Use some kind of fallback */
-                panic!("missing global logger")
-            }
-        },
-        Err(error) => {
-            if let Some(logger) = error.into_inner().deref() {
-                slog::debug!(logger, "Recovered from poisoned global logger");
-                logger.clone()
-            } else {
-                /* Fixme: Use some kind of fallback */
-                panic!("missing global logger")
-            }
-        }
+    let logger = GLOBAL_LOGGER.read().unwrap_or_else(|p| p.into_inner());
+    if let Some(logger) = locked.deref() {
+        logger.clone()
+    } else {
+        /* Fixme: Use some kind of fallback */
+        panic!("missing global logger")
     }
 }
