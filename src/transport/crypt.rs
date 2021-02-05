@@ -214,6 +214,10 @@ impl CertificateCache {
                         /* the actual result might already be taken */
                         current_context.result = Some(Ok(()));
                     }
+
+                    for waker in current_context.waker.iter() {
+                        waker.wake_by_ref();
+                    }
                 }
                 let time_end = Instant::now();
 
