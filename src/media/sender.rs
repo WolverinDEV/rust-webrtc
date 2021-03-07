@@ -252,6 +252,7 @@ impl InternalMediaSender {
             current_payload_type: 0,
             current_contributing_sources: vec![],
             current_sequence_number: 0,
+            last_send_timestamp: 0,
             id: internal_sender.track.id
         };
 
