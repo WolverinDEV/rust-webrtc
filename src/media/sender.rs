@@ -75,6 +75,7 @@ pub struct MediaSender {
     current_payload_type: u8,
     current_contributing_sources: Vec<u32>,
     current_sequence_number: u16,
+    last_send_timestamp: u32,
 
     pub(crate) events: mpsc::UnboundedReceiver<MediaSenderEvent>,
     pub(crate) control: mpsc::UnboundedSender<MediaSenderControl>
@@ -127,6 +128,8 @@ impl MediaSender {
         &mut self.current_sequence_number
     }
 
+    pub fn last_send_timestamp(&self) -> u32 { self.last_send_timestamp }
+
     pub fn send(&mut self, data: &[u8], marked: bool, timestamp: u32, extension: Option<(u16, &[u8])>) {
         let sequence_no = self.current_sequence_number;
         self.current_sequence_number = self.current_sequence_number.wrapping_add(1);
@@ -134,7 +137,9 @@ impl MediaSender {
         self.send_seq(data, sequence_no, marked, timestamp, extension);
     }
 
-    pub fn send_seq(&self, data: &[u8], seq_no: u16, marked: bool, timestamp: u32, extension: Option<(u16, &[u8])>) {
+    pub fn send_seq(&mut self, data: &[u8], seq_no: u16, marked: bool, timestamp: u32, extension: Option<(u16, &[u8])>) {
+        self.last_send_timestamp = timestamp;
+
         let mut packet = rtp_rs::RtpPacketBuilder::new()
             .ssrc(self.id)
             .payload_type(self.current_payload_type)
